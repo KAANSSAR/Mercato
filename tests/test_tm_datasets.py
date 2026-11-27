@@ -25,8 +25,9 @@ PLAYERS = pd.DataFrame({
     "contract_expiration_date": ["2028-06-30", None, None, None],
     "date_of_birth": ["2000-01-01"] * 4,
 })
-CLUBS = pd.DataFrame({"club_id": [10, 99], "name": ["Top", "Other"],
-                      "domestic_competition_id": ["GB1", "NL1"]})
+CLUBS = pd.DataFrame({"club_id": [10, 99, 11], "name": ["Top", "Other", "Relegated"],
+                      "domestic_competition_id": ["GB1", "NL1", "GB1"],
+                      "last_season": [2025, 2025, 2022]})
 TRANSFERS = pd.DataFrame({
     "player_id": [2, 3, 1],
     "transfer_date": ["2019-07-01", "2012-07-01", "2022-07-01"],
@@ -52,6 +53,13 @@ def test_coverage_report(tmp_path):
     CLUBS.to_csv(tmp_path / "clubs.csv", index=False)
     TRANSFERS.to_csv(tmp_path / "transfers.csv", index=False)
     r = coverage_report(tmp_path)
-    assert r["top5_clubs"] == 1
-    assert r["current_top5_players"] == 1
+    assert r["top5_clubs_ever"] == 2
+    assert r["current_top5_clubs"] == 1
+    assert r["current_top5_players"] == 1  # player 4 retired, player 2 at a non-top-5 club
     assert r["position_group_coverage"] == 1.0
+
+
+def test_current_top5():
+    from mercato.sources.tm_datasets import current_top5_club_ids, current_top5_player_mask
+    assert current_top5_club_ids(CLUBS) == {10}
+    assert list(current_top5_player_mask(PLAYERS, CLUBS)) == [True, False, False, False]

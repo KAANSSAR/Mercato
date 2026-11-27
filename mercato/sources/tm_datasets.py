@@ -53,7 +53,24 @@ def position_group(sub_position, position) -> str | None:
 
 
 def top5_clubs(clubs: pd.DataFrame) -> pd.DataFrame:
+    """Every club that has played in a top-5 league (relegated ones included)."""
     return clubs[clubs["domestic_competition_id"].isin(TOP5)]
+
+
+def latest_season(clubs: pd.DataFrame) -> int:
+    return int(clubs["last_season"].max())
+
+
+def current_top5_club_ids(clubs: pd.DataFrame) -> set[int]:
+    """Clubs in a top-5 league in the latest season of the dataset (about 96)."""
+    t5 = top5_clubs(clubs)
+    return set(t5.loc[t5["last_season"] == latest_season(clubs), "club_id"])
+
+
+def current_top5_player_mask(players: pd.DataFrame, clubs: pd.DataFrame) -> pd.Series:
+    """Players registered at a current top-5 club this season (retired players excluded)."""
+    return (players["current_club_id"].isin(current_top5_club_ids(clubs))
+            & (players["last_season"] >= latest_season(clubs)))
 
 
 def relevant_players(players: pd.DataFrame, transfers: pd.DataFrame,
@@ -81,10 +98,12 @@ def coverage_report(data_dir: Path = DATA_DIR) -> dict:
     club_ids = set(top5_clubs(clubs)["club_id"])
     rel = relevant_players(players, transfers, club_ids)
     rel["group"] = [position_group(s, p) for s, p in zip(rel["sub_position"], rel["position"])]
-    current = rel[rel["current_club_id"].isin(club_ids)]
+    current = rel[current_top5_player_mask(rel, clubs)]
     moves = paid_moves(transfers, club_ids)
     return {
-        "top5_clubs": len(club_ids),
+        "latest_season": latest_season(clubs),
+        "top5_clubs_ever": len(club_ids),
+        "current_top5_clubs": len(current_top5_club_ids(clubs)),
         "relevant_players": len(rel),
         "current_top5_players": len(current),
         "position_group_coverage": round(rel["group"].notna().mean(), 3),
@@ -113,12 +132,14 @@ def load(data_dir: Path = DATA_DIR) -> dict:
         names.update(dict(zip(tr["from_club_id"], tr["from_club_name"])))
         names.update(dict(zip(tr["to_club_id"], tr["to_club_name"])))
         comp = dict(zip(clubs["club_id"], clubs["domestic_competition_id"]))
+        cur_clubs = current_top5_club_ids(clubs)
         club_rows = [
-            {"tm_club_id": int(cid), "name": str(n), "tm_competition": _s(comp.get(cid))}
+            {"tm_club_id": int(cid), "name": str(n), "tm_competition": _s(comp.get(cid)),
+             "current_top5": cid in cur_clubs}
             for cid, n in names.items() if pd.notna(cid) and pd.notna(n)
         ]
         stats["rows_written"] += upsert(conn, "clubs", club_rows, ["tm_club_id"],
-                                        update=["name", "tm_competition"])
+                                        update=["name", "tm_competition", "current_top5"])
 
         nations = sorted(rel["country_of_citizenship"].dropna().unique())
         stats["rows_written"] += upsert(conn, "nations", [{"name": n} for n in nations], ["name"])
@@ -138,6 +159,7 @@ def load(data_dir: Path = DATA_DIR) -> dict:
                 cur.execute("select nextval('players_mercato_id_seq') "
                             "from generate_series(1, %s)", (len(new),))
                 pid_map.update(zip(new, (row[0] for row in cur.fetchall())))
+        is_current = dict(zip(rel["player_id"], current_top5_player_mask(rel, clubs)))
         p_rows = [
             {
                 "mercato_id": pid_map[int(r.player_id)],
@@ -150,6 +172,7 @@ def load(data_dir: Path = DATA_DIR) -> dict:
                 "contract_until": _d(r.contract_expiration_date),
                 "foot": _s(r.foot),
                 "height_cm": _i(r.height_in_cm),
+                "current_top5": bool(is_current[r.player_id]),
             }
             for r in rel.itertuples(index=False)
         ]
