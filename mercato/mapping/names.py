@@ -87,6 +87,10 @@ def player_similarity(api_name: str, tm_name: str) -> float:
     # single-name players: 'kepa' within 'kepa arrizabalaga'
     if len(a_tok) == 1 and a_tok[0] in t_tok and len(a_tok[0]) >= 4:
         score = max(score, 88.0)
+    # single names spelled differently: 'brugui' vs 'roger brugue'
+    elif len(a_tok) == 1 and len(a_tok[0]) >= 5 and any(
+            fuzz.ratio(a_tok[0], tt) >= 80 for tt in t_tok if len(tt) >= 5):
+        score = max(score, 78.0)
     return float(score)
 
 

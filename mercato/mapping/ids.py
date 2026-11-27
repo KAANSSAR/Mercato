@@ -119,10 +119,18 @@ def map_clubs(conn, api: ApiFootball) -> dict:
 
 # ---------- players ----------
 
-def player_score(tm: dict, api: dict) -> float:
+def player_score(tm: dict, api: dict, same_club: bool = False) -> float:
     s = player_similarity(api["name"], tm["name"])
+    gap = None
     if tm.get("age") is not None and api.get("age") is not None:
         gap = abs(tm["age"] - api["age"])
+    if same_club and gap is not None and gap <= 1:
+        # nicknames break initials ('T. Douvikas' = Anastasios, 'V. Castellanos' = Taty),
+        # so in one squad an identical surname and age is enough
+        a_last, t_last = player_key(api["name"]).split()[-1:], player_key(tm["name"]).split()[-1:]
+        if a_last and a_last == t_last and len(a_last[0]) >= 4:
+            s = max(s, 82.0)
+    if gap is not None:
         s += 8 if gap <= 1 else -25 if gap >= 3 else -5
     if not position_compatible(api.get("position"), tm.get("group")):
         s -= 10
@@ -140,7 +148,9 @@ GLOBAL_AUTO = 92.0       # stricter bar when searching every player, not just on
 GLOBAL_REVIEW = 80.0     # cross-club suggestions below this were all wrong on real data
 
 
-def global_candidates(api_player: dict, pool: list[dict], keys: list[str], limit: int = 5):
+def global_candidates(api_player: dict, pool: list[dict], keys: list[str], limit: int = 30):
+    """Name shortlist. Wide, because common surnames ('N. Jackson') tie with dozens of others
+    and age and position only separate them afterwards."""
     hits = process.extract(player_key(api_player["name"]), keys, scorer=fuzz.token_set_ratio,
                            limit=limit, score_cutoff=70)
     return [pool[i] for _, _, i in hits]
@@ -178,7 +188,8 @@ def map_players(conn, api: ApiFootball) -> dict:
         squad = body["response"][0]["players"] if body["response"] else []
         api_players = [{"id": x["id"], "name": x["name"], "age": x.get("age"),
                         "position": x.get("position"), "extra": club_name} for x in squad]
-        for m in assign(api_players, by_club.get(club_id, []), lambda a, t: player_score(t, a),
+        for m in assign(api_players, by_club.get(club_id, []),
+                        lambda a, t: player_score(t, a, same_club=True),
                         auto=WITHIN_CLUB_AUTO):
             results.append((m.left, m.right, m.score, m.status, club_id))
 

@@ -88,3 +88,34 @@ def test_same_club_different_surname_passes_within_club_bar():
     api = {"name": "Álvaro Fernández", "age": 23, "position": "Defender"}
     tm = {"name": "Álvaro Carreras", "age": 23, "group": "FB"}
     assert player_score(tm, api) >= WITHIN_CLUB_AUTO
+
+
+def test_nicknames_pass_within_a_club_only():
+    from mercato.mapping.ids import WITHIN_CLUB_AUTO
+    api = {"name": "T. Douvikas", "age": 27, "position": "Attacker"}
+    tm = {"name": "Anastasios Douvikas", "age": 27, "group": "ST"}
+    assert player_score(tm, api, same_club=True) >= WITHIN_CLUB_AUTO
+    assert player_score(tm, api) < WITHIN_CLUB_AUTO
+    # brothers in one squad: the initial still decides
+    jt = {"name": "Jurriën Timber", "age": 25, "group": "CB"}
+    qt = {"name": "Quinten Timber", "age": 25, "group": "CM"}
+    api_j = {"name": "J. Timber", "age": 25, "position": "Defender"}
+    assert player_score(jt, api_j, same_club=True) > player_score(qt, api_j, same_club=True)
+
+
+def test_single_name_spelling():
+    api = {"name": "Brugui", "age": 29, "position": "Midfielder"}
+    tm = {"name": "Roger Brugué", "age": 29, "group": "W"}
+    from mercato.mapping.ids import WITHIN_CLUB_AUTO
+    assert player_score(tm, api, same_club=True) >= WITHIN_CLUB_AUTO
+
+
+def test_common_surname_found_in_wide_shortlist():
+    from mercato.mapping.ids import global_candidates
+    from mercato.mapping.names import player_key
+    pool = [{"name": f"{first} Jackson"} for first in
+            ["Ben", "Brad", "Louis", "Jackson", "Cameron", "Adam", "Aaron", "Bob", "Carl", "Dan",
+             "Ed", "Fred", "Greg", "Hal", "Ian", "Jack", "Kyle", "Leo", "Mo"]]
+    pool.append({"name": "Nicolas Jackson"})
+    found = global_candidates({"name": "N. Jackson"}, pool, [player_key(p["name"]) for p in pool])
+    assert {"name": "Nicolas Jackson"} in found

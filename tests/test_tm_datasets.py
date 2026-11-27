@@ -39,8 +39,9 @@ TRANSFERS = pd.DataFrame({
 
 def test_relevant_players():
     rel = relevant_players(PLAYERS, TRANSFERS, {10})
-    # 1 current top 5; 2 moved out of a top-5 club in 2019; 3 moved too early; 4 retired
-    assert sorted(rel["player_id"]) == [1, 2]
+    # 1 current top 5; 2 moved out of a top-5 club in 2019; 3 active elsewhere this season
+    # (a possible summer signing); 4 retired in 2012
+    assert sorted(rel["player_id"]) == [1, 2, 3]
 
 
 def test_paid_moves_needs_fee_and_top5_buyer():

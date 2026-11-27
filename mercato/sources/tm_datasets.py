@@ -75,13 +75,18 @@ def current_top5_player_mask(players: pd.DataFrame, clubs: pd.DataFrame) -> pd.S
 
 def relevant_players(players: pd.DataFrame, transfers: pd.DataFrame,
                      club_ids: set[int]) -> pd.DataFrame:
-    """Current top-5 players, plus anyone who moved to or from a top-5 club since MIN_SEASON."""
+    """Players we keep:
+    - top-5 players since MIN_SEASON, and anyone who moved to or from a top-5 club
+    - anyone active in the last two seasons in any league the dataset covers, so summer
+      signings from the Eredivisie, Liga Portugal, Super Lig and so on are already loaded
+    """
     current = (players["current_club_id"].isin(club_ids)
                & (players["last_season"] >= MIN_SEASON))
     t = transfers[pd.to_datetime(transfers["transfer_date"]).dt.year >= MIN_SEASON]
     movers = set(t.loc[t["from_club_id"].isin(club_ids) | t["to_club_id"].isin(club_ids),
                        "player_id"])
-    return players[current | players["player_id"].isin(movers)].copy()
+    active = players["last_season"] >= players["last_season"].max() - 1
+    return players[current | active | players["player_id"].isin(movers)].copy()
 
 
 def paid_moves(transfers: pd.DataFrame, club_ids: set[int]) -> pd.DataFrame:
