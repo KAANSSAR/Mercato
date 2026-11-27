@@ -1,6 +1,6 @@
 """Seed competitions and seasons. Safe to rerun."""
 
-from mercato.config import COMPETITIONS
+from mercato.config import COMPETITIONS, CURRENT_SEASON, FIRST_SEASON
 from mercato.db import connect, upsert
 
 TM_CODES = {
@@ -22,7 +22,6 @@ NAMES = {
     "europa_league": "Europa League",
 }
 CUPS = {"champions_league", "europa_league"}
-FIRST_SEASON, CURRENT_SEASON = 2015, 2025  # 2025 = 2025/26
 
 
 def main():

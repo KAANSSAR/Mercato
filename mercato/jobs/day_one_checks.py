@@ -13,7 +13,7 @@ from mercato.sources.api_football import ApiFootball
 
 def main():
     api = ApiFootball(budget=10)
-    print("status:", api.status().get("response"))
+    print("status:", api.status())
 
     # One call returns every league with its available seasons and coverage
     leagues = api.get("leagues")["response"]

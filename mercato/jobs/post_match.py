@@ -1,13 +1,15 @@
-"""Post-match job: poll, detect, pull, upsert, refresh.
+"""Post-match job: check plan, poll, detect, pull, upsert, refresh.
 
 Idempotent: only matches at full time with no stats yet are pulled,
-so reruns cost zero requests.
+so reruns cost zero requests. Skips all API calls when live is off.
 """
 
 import datetime as dt
+import sys
 
+from mercato import service_status
 from mercato.config import COMPETITIONS
-from mercato.sources.api_football import ApiFootball
+from mercato.sources.api_football import ApiFootball, PlanRestricted
 
 FINISHED = {"FT", "AET", "PEN"}
 TRACKED = set(COMPETITIONS.values())
@@ -23,24 +25,54 @@ def finished_tracked(fixtures: list[dict], already_pulled: set[int]) -> list[dic
     ]
 
 
-def run(date: str | None = None, already_pulled: set[int] | None = None) -> dict:
+def pulled_ids(conn, fixture_ids: list[int]) -> set[int]:
+    if not fixture_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute("select api_football_id from matches "
+                    "where api_football_id = any(%s) and stats_pulled_at is not null",
+                    (fixture_ids,))
+        return {r[0] for r in cur.fetchall()}
+
+
+def run(conn, api: ApiFootball, date: str | None = None) -> dict:
     date = date or dt.datetime.now(dt.UTC).date().isoformat()
-    already_pulled = already_pulled or set()  # TODO: read from matches.stats_pulled_at
+
+    status, change = service_status.check(conn, api)
+    if not status["live_enabled"]:
+        return {"date": date, "skipped": status["reason"], "change": change, "status": status}
+
+    try:
+        fixtures = api.fixtures_by_date(date)
+        todo = finished_tracked(fixtures, pulled_ids(conn, [f["fixture"]["id"] for f in fixtures]))
+        for f in todo:
+            fid = f["fixture"]["id"]
+            players = api.fixture_players(fid)
+            teams = api.fixture_statistics(fid)
+            # TODO: upsert matches, player_match_stats, team_match_stats; set stats_pulled_at
+            _ = players, teams
+    except PlanRestricted as e:
+        change = service_status.mark_restricted(conn, str(e)) or change
+        return {"date": date, "skipped": str(e), "change": change, "status": status,
+                "requests": api.requests_made}
+
+    service_status.mark_live_update(conn)
+    return {"date": date, "fixtures": len(fixtures), "pulled": len(todo),
+            "requests": api.requests_made, "change": change, "status": status}
+
+
+def main() -> int:
+    from mercato.db import connect, job_run
 
     api = ApiFootball()
-    fixtures = api.fixtures_by_date(date)
-    todo = finished_tracked(fixtures, already_pulled)
-
-    for f in todo:
-        fid = f["fixture"]["id"]
-        players = api.fixture_players(fid)
-        teams = api.fixture_statistics(fid)
-        # TODO: upsert matches, player_match_stats, team_match_stats; set stats_pulled_at
-        _ = players, teams
-
-    return {"date": date, "fixtures": len(fixtures), "pulled": len(todo),
-            "requests": api.requests_made}
+    with connect() as conn:
+        with job_run(conn, "post_match") as stats:
+            result = run(conn, api)
+            stats["requests"] = api.requests_made
+        print({k: v for k, v in result.items() if k != "status"})
+        alert = service_status.announce(result["change"], result["status"])
+    return 1 if alert else 0
 
 
 if __name__ == "__main__":
-    print(run())
+    sys.exit(main())

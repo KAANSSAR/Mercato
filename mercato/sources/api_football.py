@@ -16,10 +16,16 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class PlanRestricted(RuntimeError):
+    """The current plan can't reach this season or endpoint."""
+
+
 class ApiFootball:
-    def __init__(self, key: str | None = None, budget: int | None = None):
+    def __init__(self, key: str | None = None, budget: int | None = None,
+                 transport: httpx.BaseTransport | None = None):
         self.client = httpx.Client(
             base_url=BASE_URL,
+            transport=transport,
             headers={"x-apisports-key": key or settings.api_football_key},
             timeout=30,
         )
@@ -27,6 +33,7 @@ class ApiFootball:
         self.requests_made = 0
         self.remaining_today: int | None = None
         self._last_call = 0.0
+        self.min_interval = 6.1  # seconds, keeps under 10 a minute
 
     def get(self, path: str, **params) -> dict:
         if self.requests_made >= self.budget:
@@ -35,7 +42,7 @@ class ApiFootball:
             raise BudgetExceeded("API reports 0 requests left today")
 
         # Stay under 10 a minute
-        wait = 6.1 - (time.monotonic() - self._last_call)
+        wait = self.min_interval - (time.monotonic() - self._last_call)
         if wait > 0:
             time.sleep(wait)
 
@@ -49,8 +56,11 @@ class ApiFootball:
 
         resp.raise_for_status()
         body = resp.json()
-        if body.get("errors"):
-            raise RuntimeError(f"API-Football error on {path}: {body['errors']}")
+        errors = body.get("errors")
+        if errors:
+            if isinstance(errors, dict) and "plan" in errors:
+                raise PlanRestricted(errors["plan"])
+            raise RuntimeError(f"API-Football error on {path}: {errors}")
         return body
 
     # Endpoints we use
@@ -68,4 +78,6 @@ class ApiFootball:
 
     def status(self) -> dict:
         """Account status. Does not count against the daily quota."""
-        return self.client.get("/status").json()
+        resp = self.client.get("/status")
+        resp.raise_for_status()
+        return resp.json()["response"]

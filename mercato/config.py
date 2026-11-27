@@ -11,7 +11,21 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# API-Football league IDs. Verify on day one with the /leagues endpoint.
+# Seasons are labelled by start year: 2026 = 2026/27
+CURRENT_SEASON = 2026
+FIRST_SEASON = 2015
+# Free plan only reaches these (verified 27 Nov 2026)
+FREE_SEASONS = (2022, 2023, 2024)
+
+
+def api_seasons(plan: str) -> tuple[int, ...]:
+    """Seasons API-Football will serve on this plan."""
+    if plan.lower() == "free":
+        return FREE_SEASONS
+    return tuple(range(FIRST_SEASON, CURRENT_SEASON + 1))
+
+
+# API-Football league IDs (verified 27 Nov 2026)
 COMPETITIONS = {
     "premier_league": 39,
     "laliga": 140,
