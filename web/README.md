@@ -12,7 +12,7 @@ The backend keeps one row in `service_status`. Every page reads it (cached with 
 | `reason` | Banner text when live is off |
 | `last_live_update` | "Updated 2h ago" and "Stats as of 22 Nov" |
 | `seasons` | Which seasons have full stats, for season pickers |
-| `plan` | Not shown publicly |
+| `plan` | Not shown publicly. Free plan still runs live updates |
 
 ### When `live_enabled` is true
 Everything shows as normal. Show "Updated Xh ago" from `last_live_update`. If that's more than 48 hours old on a matchday, show a soft "Updates delayed" note.

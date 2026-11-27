@@ -35,15 +35,33 @@ def pulled_ids(conn, fixture_ids: list[int]) -> set[int]:
         return {r[0] for r in cur.fetchall()}
 
 
+def dates_to_poll(now: dt.datetime) -> list[str]:
+    """Today in UTC, plus yesterday in the first hours after midnight to catch late finishes.
+
+    The free plan only reaches back to yesterday, so anything older is unrecoverable on free.
+    """
+    today = now.date()
+    dates = [today.isoformat()]
+    if now.hour < 3:
+        dates.insert(0, (today - dt.timedelta(days=1)).isoformat())
+    return dates
+
+
 def run(conn, api: ApiFootball, date: str | None = None) -> dict:
-    date = date or dt.datetime.now(dt.UTC).date().isoformat()
+    now = dt.datetime.now(dt.UTC)
+    dates = [date] if date else dates_to_poll(now)
 
     status, change = service_status.check(conn, api)
     if not status["live_enabled"]:
-        return {"date": date, "skipped": status["reason"], "change": change, "status": status}
+        return {"dates": dates, "skipped": status["reason"], "change": change, "status": status}
+
+    gap = service_status.hours_since_live_update(conn)
+    if gap is not None and gap > service_status.GAP_WARN_HOURS:
+        print(f"::warning title=Mercato update gap::Last live update {gap:.0f}h ago. "
+              "On the free plan, matches older than yesterday can't be fetched.")
 
     try:
-        fixtures = api.fixtures_by_date(date)
+        fixtures = [f for d in dates for f in api.fixtures_by_date(d)]
         todo = finished_tracked(fixtures, pulled_ids(conn, [f["fixture"]["id"] for f in fixtures]))
         for f in todo:
             fid = f["fixture"]["id"]
@@ -53,11 +71,11 @@ def run(conn, api: ApiFootball, date: str | None = None) -> dict:
             _ = players, teams
     except PlanRestricted as e:
         change = service_status.mark_restricted(conn, str(e)) or change
-        return {"date": date, "skipped": str(e), "change": change, "status": status,
+        return {"dates": dates, "skipped": str(e), "change": change, "status": status,
                 "requests": api.requests_made}
 
     service_status.mark_live_update(conn)
-    return {"date": date, "fixtures": len(fixtures), "pulled": len(todo),
+    return {"dates": dates, "fixtures": len(fixtures), "pulled": len(todo),
             "requests": api.requests_made, "change": change, "status": status}
 
 

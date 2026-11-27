@@ -1,13 +1,14 @@
 """Tracks whether live updates can run, so the site can hide live features cleanly.
 
-Free plan: no current-season access, so live is off.
-Pro or higher and active: live is on.
-A PlanRestricted error from the API also switches live off, whatever the plan says.
+Any active plan: live is on. The free plan can't query whole seasons outside 2022 to 2024,
+but it can read fixtures and match stats for dates from yesterday to tomorrow, which is all
+the post-match job needs (verified 27 Nov 2026).
+Inactive subscription, or a PlanRestricted error from the API: live is off.
 """
 
 from mercato.config import api_seasons
 
-FREE_REASON = "Live match updates are paused. Stats are shown as of the last update."
+RESTRICTED_REASON = "Live match updates are paused. Stats are shown as of the last update."
 INACTIVE_REASON = "Live match updates are paused while the data subscription is inactive."
 
 
@@ -17,9 +18,8 @@ def evaluate(status: dict) -> dict:
     req = status.get("requests") or {}
     plan = str(sub.get("plan") or "unknown")
     active = bool(sub.get("active"))
-    is_free = plan.lower() == "free"
-    live = active and not is_free
-    reason = None if live else (FREE_REASON if active else INACTIVE_REASON)
+    live = active
+    reason = None if live else INACTIVE_REASON
     return {
         "plan": plan,
         "live_enabled": live,
@@ -80,12 +80,23 @@ def mark_restricted(conn, detail: str) -> str | None:
         "plan": r[0] if r else "unknown",
         "live_enabled": False,
         "seasons": r[1] if r else [],
-        "reason": FREE_REASON,
+        "reason": RESTRICTED_REASON,
         "requests_today": r[2] if r else None,
         "request_limit": r[3] if r else None,
     }
     print(f"Plan restriction: {detail}")
     return save(conn, row)
+
+
+GAP_WARN_HOURS = 30  # free plan only reaches back to yesterday
+
+
+def hours_since_live_update(conn) -> float | None:
+    with conn.cursor() as cur:
+        cur.execute("select extract(epoch from now() - last_live_update) / 3600 "
+                    "from service_status where id = 1")
+        r = cur.fetchone()
+    return float(r[0]) if r and r[0] is not None else None
 
 
 def mark_live_update(conn) -> None:
@@ -97,7 +108,7 @@ def mark_live_update(conn) -> None:
 def announce(change: str | None, row: dict) -> bool:
     """Print GitHub Actions annotations. Returns True if the run should fail to send an alert."""
     if change == "downgrade":
-        print(f"::error title=Mercato live updates OFF::Plan is {row['plan']}. "
+        print(f"::error title=Mercato live updates OFF::{row['reason']} (plan: {row['plan']}). "
               "Site now shows the paused banner and hides live features.")
         return True
     if change == "upgrade":

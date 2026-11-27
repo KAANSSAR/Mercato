@@ -14,7 +14,8 @@ settings = Settings()
 # Seasons are labelled by start year: 2026 = 2026/27
 CURRENT_SEASON = 2026
 FIRST_SEASON = 2015
-# Free plan only reaches these (verified 27 Nov 2026)
+# Free plan: whole-season queries only for these. Fixtures and match stats by date work
+# for yesterday to tomorrow on any season, which covers live updates (verified 27 Nov 2026).
 FREE_SEASONS = (2022, 2023, 2024)
 
 
