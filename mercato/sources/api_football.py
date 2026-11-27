@@ -3,13 +3,16 @@
 Free tier: 100 requests a day, 10 a minute, resets at midnight UTC.
 """
 
+import json
 import time
+from pathlib import Path
 
 import httpx
 
 from mercato.config import settings
 
 BASE_URL = "https://v3.football.api-sports.io"
+CACHE_DIR = Path("data/api_cache")
 
 
 class BudgetExceeded(RuntimeError):
@@ -61,6 +64,17 @@ class ApiFootball:
             if isinstance(errors, dict) and "plan" in errors:
                 raise PlanRestricted(errors["plan"])
             raise RuntimeError(f"API-Football error on {path}: {errors}")
+        return body
+
+    def cached(self, path: str, refresh: bool = False, **params) -> dict:
+        """GET with an on-disk cache, so interrupted jobs resume without re-spending requests."""
+        key = "_".join(f"{k}-{v}" for k, v in sorted(params.items())) or "all"
+        file = CACHE_DIR / path.replace("/", "_") / f"{key}.json"
+        if file.exists() and not refresh:
+            return json.loads(file.read_text())
+        body = self.get(path, **params)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(json.dumps(body))
         return body
 
     # Endpoints we use
