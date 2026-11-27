@@ -18,11 +18,12 @@ from rapidfuzz import fuzz, process
 from mercato.config import COMPETITIONS, FREE_SEASONS
 from mercato.mapping.match import Match, assign
 from mercato.mapping.names import (
-    club_key,
+    CLUB_NOISE,
     club_similarity,
     player_key,
     player_similarity,
     position_compatible,
+    tokens,
 )
 from mercato.sources.api_football import ApiFootball, BudgetExceeded
 
@@ -42,18 +43,22 @@ def read_overrides(name: str) -> dict[int, int]:
 
 
 def write_review(name: str, matches: list[Match], fields: list[str]) -> Path:
+    """Writes <name>.csv (plausible matches to check, best first) and <name>_unmatched.csv."""
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
-    f = REVIEW_DIR / f"{name}.csv"
-    with f.open("w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["status", "score", *fields, "api_football_id", "api_name", "api_extra"])
-        for m in sorted(matches, key=lambda m: (m.status != "review", m.score)):
-            if m.status == "auto":
-                continue
-            r = m.right or {}
-            w.writerow([m.status, round(m.score, 1), *[m.left.get(x) for x in fields],
-                        r.get("id"), r.get("name"), r.get("extra")])
-    return f
+    header = ["status", "score", *fields, "api_football_id", "api_name", "api_extra"]
+    files = {"review": REVIEW_DIR / f"{name}.csv",
+             "unmatched": REVIEW_DIR / f"{name}_unmatched.csv"}
+    for status, f in files.items():
+        with f.open("w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(header)
+            for m in sorted(matches, key=lambda m: -m.score):
+                if m.status != status:
+                    continue
+                r = m.right or {}
+                w.writerow([m.status, round(m.score, 1), *[m.left.get(x) for x in fields],
+                            r.get("id"), r.get("name"), r.get("extra")])
+    return files["review"]
 
 
 # ---------- clubs ----------
@@ -80,7 +85,8 @@ def map_clubs(conn, api: ApiFootball) -> dict:
     for m in matches:
         if m.status == "auto":
             continue
-        q = " ".join(w for w in club_key(m.left["name"]).split() if len(w) >= 3)[:30]
+        q = " ".join(w for w in tokens(m.left["name"])
+                     if w not in CLUB_NOISE and len(w) >= 3)[:30]
         if len(q) < 3:
             continue
         found = [{"id": t["team"]["id"], "name": t["team"]["name"],
@@ -105,8 +111,9 @@ def map_clubs(conn, api: ApiFootball) -> dict:
             cur.execute("update clubs set api_football_id = %s where id = %s", (api_id, club_id))
         n = len(final)
     conn.commit()
-    review = write_review("clubs", matches, ["tm_id", "name", "league"])
-    return {"clubs": len(tm), "mapped": n, "to_review": sum(m.status != "auto" for m in matches),
+    open_items = [m for m in matches if m.status != "auto" and m.left["tm_id"] not in overrides]
+    review = write_review("clubs", open_items, ["tm_id", "name", "league"])
+    return {"clubs": len(tm), "mapped": n, "to_review": len(open_items),
             "review_file": str(review), "requests": api.requests_made}
 
 
@@ -128,7 +135,9 @@ def age_on(birth: dt.date | None, today: dt.date) -> int | None:
     return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
 
 
-GLOBAL_AUTO = 92.0  # stricter bar when searching every player, not just one squad
+WITHIN_CLUB_AUTO = 80.0  # squad-by-squad pairing plus age makes a lower bar safe
+GLOBAL_AUTO = 92.0       # stricter bar when searching every player, not just one squad
+GLOBAL_REVIEW = 80.0     # cross-club suggestions below this were all wrong on real data
 
 
 def global_candidates(api_player: dict, pool: list[dict], keys: list[str], limit: int = 5):
@@ -169,7 +178,8 @@ def map_players(conn, api: ApiFootball) -> dict:
         squad = body["response"][0]["players"] if body["response"] else []
         api_players = [{"id": x["id"], "name": x["name"], "age": x.get("age"),
                         "position": x.get("position"), "extra": club_name} for x in squad]
-        for m in assign(api_players, by_club.get(club_id, []), lambda a, t: player_score(t, a)):
+        for m in assign(api_players, by_club.get(club_id, []), lambda a, t: player_score(t, a),
+                        auto=WITHIN_CLUB_AUTO):
             results.append((m.left, m.right, m.score, m.status, club_id))
 
     # Pass 2: unmatched squad players against everyone (summer moves the dataset hasn't caught)
@@ -188,7 +198,7 @@ def map_players(conn, api: ApiFootball) -> dict:
         if best_sc >= GLOBAL_AUTO and clear and best["mercato_id"] not in taken:
             results[i] = (a, best, best_sc, "auto", club_id)
             taken.add(best["mercato_id"])
-        elif best_sc > sc:
+        elif best_sc > sc and best_sc >= GLOBAL_REVIEW:
             results[i] = (a, best, best_sc, "review", club_id)
 
     # Overrides win; drop any auto match that collides with one
@@ -204,14 +214,16 @@ def map_players(conn, api: ApiFootball) -> dict:
         if tm_id in tm_to_mid:
             final[tm_to_mid[tm_id]] = (api_id, 100.0, "manual", api_club_of.get(api_id))
 
+    id_rows = [(api_id, how, min(sc, 100.0), mid) for mid, (api_id, sc, how, _) in final.items()]
+    # API squads are more current than the dataset
+    club_rows = [(club_id, mid) for mid, (_, _, _, club_id) in final.items() if club_id]
     with conn.cursor() as cur:
         cur.execute("update id_map set api_football_id = null where api_football_id is not null")
-        for mid, (api_id, sc, how, club_id) in final.items():
-            cur.execute("update id_map set api_football_id = %s, match_method = %s, "
-                        "match_score = %s where mercato_id = %s", (api_id, how, min(sc, 100.0), mid))
-            if club_id:  # API squads are more current than the dataset
-                cur.execute("update players set club_id = %s, current_top5 = true "
-                            "where mercato_id = %s", (club_id, mid))
+        with conn.pipeline():
+            cur.executemany("update id_map set api_football_id = %s, match_method = %s, "
+                            "match_score = %s where mercato_id = %s", id_rows)
+            cur.executemany("update players set club_id = %s, current_top5 = true "
+                            "where mercato_id = %s", club_rows)
     conn.commit()
 
     review = write_review("players", [
@@ -219,7 +231,8 @@ def map_players(conn, api: ApiFootball) -> dict:
                          "extra": f"{a['extra']}, {a.get('position')}, age {a.get('age')}"}, sc, st)
         for a, tm, sc, st, _ in results], ["tm_id", "name", "age", "group", "club"])
     return {"clubs_done": done, "clubs_left": stopped, "api_players": len(results),
-            "mapped": len(final), "to_review": sum(st != "auto" for _, _, _, st, _ in results),
+            "mapped": len(final), "to_review": sum(st == "review" for _, _, _, st, _ in results),
+            "unmatched": sum(st == "unmatched" for _, _, _, st, _ in results),
             "review_file": str(review), "requests": api.requests_made}
 
 

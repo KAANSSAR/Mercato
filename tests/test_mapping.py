@@ -18,6 +18,8 @@ from mercato.mapping.names import club_similarity, player_similarity, position_c
     ("Brighton & Hove Albion", "Brighton"),
     ("Borussia Mönchengladbach", "Borussia Monchengladbach"),
     ("Atlético de Madrid", "Atletico Madrid"),
+    ("Nott'm Forest", "Nottingham Forest"),
+    ("Stade Rennais", "Rennes"),
 ])
 def test_club_names_match(tm, api):
     assert club_similarity(tm, api) >= 85
@@ -39,6 +41,12 @@ def test_club_assignment_is_one_to_one():
     ("B. Saka", "Bryan Mbeumo", False),
     ("J. Timber", "Jurriën Timber", True),
     ("J. Timber", "Quinten Timber", False),
+    ("M. Đurić", "Milan Djuric", True),
+    ("M. Bokele Mputu", "Morgan Bokele", True),
+    ("C. Mawissa Elebi", "Christian Mawissa", True),
+    ("E. Scott", "Scott Dann", False),
+    ("A. Dieng", "Bamba Dieng", False),
+    ("Joël Monteiro", "Javi Montero", False),
 ])
 def test_player_names(api, tm, ok):
     assert (player_similarity(api, tm) >= 85) == ok
@@ -73,3 +81,10 @@ def test_age_on():
     assert age_on(dt.date(2001, 9, 5), dt.date(2026, 9, 4)) == 24
     assert age_on(dt.date(2001, 9, 5), dt.date(2026, 9, 5)) == 25
     assert age_on(None, dt.date(2026, 1, 1)) is None
+
+
+def test_same_club_different_surname_passes_within_club_bar():
+    from mercato.mapping.ids import WITHIN_CLUB_AUTO
+    api = {"name": "Álvaro Fernández", "age": 23, "position": "Defender"}
+    tm = {"name": "Álvaro Carreras", "age": 23, "group": "FB"}
+    assert player_score(tm, api) >= WITHIN_CLUB_AUTO
