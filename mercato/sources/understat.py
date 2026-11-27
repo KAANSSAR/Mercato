@@ -1,5 +1,8 @@
 """Understat loader via soccerdata. Free xG and xA for the top 5 leagues, 2014/15 on.
 
+PARKED (27 Nov 2026): Understat's data endpoints return its error page and soccerdata
+hasn't caught up. Model v1 runs without xG. Revisit later.
+
     uv run python -m mercato.sources.understat              # all seasons, ~55 page loads
     uv run python -m mercato.sources.understat 2024 2025    # just these seasons
 
