@@ -1,0 +1,20 @@
+name: post-match
+
+on:
+  # Schedule switched on in ship week. Times are UTC.
+  # schedule:
+  #   - cron: "*/30 11-23 * * 6,0"   # weekends
+  #   - cron: "*/30 17-23 * * 2,3,4" # UCL / UEL nights
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run python -m mercato.jobs.post_match
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
