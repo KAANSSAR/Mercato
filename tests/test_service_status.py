@@ -111,3 +111,18 @@ def test_dates_to_poll():
     day = dt.datetime(2026, 11, 28, 15, 0, tzinfo=dt.UTC)
     assert dates_to_poll(late) == ["2026-11-27", "2026-11-28"]
     assert dates_to_poll(day) == ["2026-11-28"]
+
+
+def test_daily_limit_error_raises_budget_exceeded():
+    from mercato.sources.api_football import BudgetExceeded
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "errors": {"requests": "You have reached the request limit for the day"},
+            "response": []})
+    api = ApiFootball(key="x", budget=5, transport=httpx.MockTransport(handler))
+    api.min_interval = 0
+    with pytest.raises(BudgetExceeded):
+        api.get("players/squads", team=42)
+    with pytest.raises(BudgetExceeded):  # no further calls once the limit is known
+        api.get("players/squads", team=43)

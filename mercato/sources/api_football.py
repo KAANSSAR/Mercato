@@ -63,6 +63,9 @@ class ApiFootball:
         if errors:
             if isinstance(errors, dict) and "plan" in errors:
                 raise PlanRestricted(errors["plan"])
+            if isinstance(errors, dict) and "requests" in errors:  # daily limit reached
+                self.remaining_today = 0
+                raise BudgetExceeded(errors["requests"])
             raise RuntimeError(f"API-Football error on {path}: {errors}")
         return body
 
