@@ -8,18 +8,21 @@ P50 for a fixed set of reference players under each variant. Writes nothing.
 
 import pandas as pd
 
-from mercato.model.features import NUMERIC, NUMERIC_EURO
+from mercato.model.features import MARKET, NUMERIC, NUMERIC_EURO, PCTS
 from mercato.model.train import PARAMS, current_features, fit, load, prepare, value_current
 
 REFERENCE = ["Morgan Rogers", "Cole Palmer", "Florian Wirtz", "Bukayo Saka", "Erling Haaland",
              "Lamine Yamal", "Kylian Mbappé", "Hugo Ekitiké", "Ryan Gravenberch", "Declan Rice"]
 
 VARIANTS = {
+    "v1.5": {"numeric": NUMERIC_EURO},
+    "+position pct": {"numeric": NUMERIC_EURO + PCTS},
+    "+buyer/seller": {"numeric": NUMERIC_EURO + MARKET},
+    "+both": {"numeric": NUMERIC_EURO + PCTS + MARKET},
+}
+OLD_VARIANTS = {  # structure comparison from v1.5, kept for reference
     "A v1.4": {"numeric": NUMERIC, "params": PARAMS | {"max_depth": 3}, "additive": False},
     "B euro+depth2": {"numeric": NUMERIC_EURO, "params": PARAMS, "additive": False},
-    "C v1.5 (B+additive)": {"numeric": NUMERIC_EURO, "params": PARAMS, "additive": True},
-    "D B+leaf50": {"numeric": NUMERIC_EURO, "params": PARAMS | {"min_child_weight": 50},
-                   "additive": False},
 }
 
 
@@ -46,6 +49,7 @@ def main():
         m = r["metrics"]
         summary[name] = {
             "mdape": f"{m['test_mdape']:.1%}", "coverage": f"{m['test_coverage_p10_p90']:.0%}",
+            **{f"mdape {ln}": f"{v:.1%}" for ln, v in m["mdape_by_line"].items()},
             "band": f"x{m['band_multipliers'][0]} to x{m['band_multipliers'][1]}",
             "at_cap": int(v["capped"].sum()),
             "median_gap_vs_tm": f"{(regulars['p50'] / regulars['tm_value']).median() - 1:+.0%}",

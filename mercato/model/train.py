@@ -28,11 +28,16 @@ import xgboost as xgb
 
 from mercato.features.elo import run as run_elo
 from mercato.model.features import (
+    GROUP_LINE,
+    LINES,
     NUMERIC_EURO,
+    add_percentiles,
     additive_platform,
     design_matrix,
     finish,
     latest_elo,
+    market_features,
+    money_table,
     monotone_constraints,
     prepare_appearances,
     raw_features,
@@ -71,12 +76,19 @@ class Data:
     team_elo: pd.DataFrame
     _prepared: tuple | None = None
 
+    _money: pd.DataFrame | None = None
+
     def prepared(self):
         """Appearances with opponent Elo, club game dates, club Elo history. Built once."""
         if self._prepared is None:
             self._prepared = (prepare_appearances(self.apps, self.team_elo),
                               club_games_table(self.team_elo), latest_elo(self.team_elo))
         return self._prepared
+
+    def money(self) -> pd.DataFrame:
+        if self._money is None:
+            self._money = money_table(self.transfers)
+        return self._money
 
 
 def load(data_dir: Path = DATA_DIR) -> Data:
@@ -89,7 +101,8 @@ def load(data_dir: Path = DATA_DIR) -> Data:
 def _player_info(d: Data) -> pd.DataFrame:
     p = d.players[["player_id", "date_of_birth", "sub_position", "position"]].copy()
     p["group"] = [position_group(s, q) for s, q in zip(p["sub_position"], p["position"])]
-    return p.rename(columns={"date_of_birth": "birth"})[["player_id", "birth", "group"]]
+    p["line"] = p["position"].map(LINES).fillna(p["group"].map(GROUP_LINE))
+    return p.rename(columns={"date_of_birth": "birth"})[["player_id", "birth", "group", "line"]]
 
 
 def training_rows(d: Data) -> pd.DataFrame:
@@ -104,15 +117,21 @@ def training_rows(d: Data) -> pd.DataFrame:
     rows = pd.DataFrame({
         "player_id": t["player_id"].astype(int), "as_of": t["as_of"],
         "club_id": t["from_club_id"], "league": t["from_club_id"].map(league).fillna("other"),
-        "fee": t["fee"], "season": t["season"],
+        "buyer_id": t["to_club_id"], "fee": t["fee"], "season": t["season"],
         "tm_value": pd.to_numeric(t.get("market_value_in_eur"), errors="coerce"),
     })
     rows = rows.merge(_player_info(d), on="player_id", how="inner")
     return rows.dropna(subset=["birth", "group"]).reset_index(drop=True)
 
 
-def features_for(rows: pd.DataFrame, d: Data, group_means: dict | None = None):
-    return finish(raw_features(rows, *d.prepared()), group_means)
+def features_for(rows: pd.DataFrame, d: Data, state: dict | None = None):
+    """All features. state carries what training learned (position averages, percentile
+    references, the typical buyer) so prediction uses the same yardsticks."""
+    state = state or {}
+    f, gm = finish(raw_features(rows, *d.prepared()), state or None)
+    f, pct = add_percentiles(f, state.get("_pct"))
+    f, buyer = market_features(f, d.money(), d.prepared()[2], state.get("_buyer"))
+    return f, {**gm, "_pct": pct, "_buyer": buyer}
 
 
 def fit_median(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
@@ -215,6 +234,9 @@ def prepare(d: Data, min_test_moves: int = 200) -> dict:
     f_tr, gm = features_for(rows[tr], d)
     f_va, _ = features_for(rows[va], d, gm)
     f_te, _ = features_for(rows[te], d, gm)
+    # the typical buyer for valuations: the median top-5 buyer of the newest season
+    gm["_buyer"] = {"buyer_spend_3y": float(f_te["buyer_spend_3y"].median()),
+                    "buyer_elo": float(f_te["buyer_elo"].median())}
     return {"rows": rows, "index": index, "level": level, "test_season": test_season,
             "f_tr": f_tr, "f_va": f_va, "f_te": f_te, "gm": gm}
 
@@ -247,6 +269,9 @@ def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = NUME
         "age_support": rule[0], "age_decline_per_year": round(float(np.exp(rule[1]) - 1), 3),
         "tm_value_mdape_same_moves": mdape(tm_adj[tm_ok], f_te.loc[tm_ok, "fee_adj"]),
         "naive_median_mdape": mdape(np.full(len(actual), np.median(f_tr["fee_adj"])), actual),
+        "mdape_by_line": {ln: round(mdape(p_te.loc[m, "p50"], actual[m.to_numpy()]), 3)
+                          for ln in ("ATT", "MID", "DEF", "GK")
+                          if (m := f_te["line"] == ln).sum() >= 10},
         "fee_index": {int(k): round(float(v)) for k, v in index.items()},
     }
 
@@ -293,7 +318,7 @@ def value_current(d: Data, result: dict, f: pd.DataFrame | None = None) -> pd.Da
     p = predict(result["model"], X, result["band"], f["age"], result["age_rule"],
                 cap=result["cap"], dense_max=result.get("dense_max"))
     out = pd.concat([f[["player_id", "minutes_1y", "minutes_best", "tm_value", "group",
-                        "age"]], p], axis=1)
+                        "line", "age"]], p], axis=1)
     out["drivers"] = drivers(result["model"], X, p["p50"])
     out["gap"] = out["p50"] / out["tm_value"] - 1
     return out
@@ -307,8 +332,11 @@ def save(result: dict, values: pd.DataFrame) -> dict:
     out = MODEL_DIR / VERSION
     out.mkdir(parents=True, exist_ok=True)
     result["model"].save_model(out / "p50.json")
+    gm = {k: v for k, v in result["group_means"].items() if k != "_pct"}
+    gm["_pct"] = {src: {g: list(map(float, arr)) for g, arr in by.items()}
+                  for src, by in result["group_means"]["_pct"].items()}
     (out / "meta.json").write_text(json.dumps(
-        {"columns": result["columns"], "group_means": result["group_means"],
+        {"columns": result["columns"], "group_means": gm,
          "level": result["level"], "cap": result["cap"], "dense_max": result["dense_max"],
          "numeric": result["numeric"], "additive": result["additive"], "band": result["band"],
          "age_rule": result["age_rule"], "metrics": result["metrics"]},
@@ -357,9 +385,11 @@ def report(d: Data, values: pd.DataFrame) -> None:
     cols = ["name", "group", "age", "p10", "p50", "p90", "tm_value", "gap"]
     fmt = {"age": "{:.0f}".format, "gap": "{:+.0%}".format,
            **{c: (lambda v: f"€{v / 1e6:.1f}m") for c in ["p10", "p50", "p90", "tm_value"]}}
-    print("\nMost undervalued by Transfermarkt (regulars, TM value €5m+):")
-    print(regulars.sort_values("gap", ascending=False)[cols].head(15).to_string(
-        index=False, formatters=fmt))
+    print("\nMost undervalued by Transfermarkt (regulars, TM value €5m+), by line:")
+    for ln, title in [("ATT", "Attack"), ("MID", "Midfield"), ("DEF", "Defence"), ("GK", "GK")]:
+        sub = regulars[regulars["line"] == ln].sort_values("gap", ascending=False)
+        print(f"\n{title}")
+        print(sub[cols].head(5).to_string(index=False, formatters=fmt))
     print("\nHighest valuations:")
     top = values.assign(name=values["player_id"].map(names)).sort_values("p50", ascending=False)
     print(top[cols].head(10).to_string(index=False, formatters=fmt))

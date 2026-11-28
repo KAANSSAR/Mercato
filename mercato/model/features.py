@@ -41,10 +41,13 @@ EURO_RUN_MINUTES = 1200  # roughly one full Champions League or Europa League ca
 NUMERIC = ["age_under_peak", "age_over_peak", "share_best", "share_1y", "top5_share_2y",
            "ucl_share_2y", "uel_share_2y", "g90", "a90", "ga90", "club_elo", "year"]
 MONOTONE = {"share_best": 1, "top5_share_2y": 1, "ucl_share_2y": 1, "euro_share": 1,
-            "g90": 1, "a90": 1, "ga90": 1, "club_elo": 1, "age_over_peak": -1}
+            "g90": 1, "a90": 1, "ga90": 1, "club_elo": 1, "age_over_peak": -1,
+            "ga90_pct": 1, "g90_pct": 1, "a90_pct": 1, "share_pct": 1,
+            "buyer_spend_3y": 1, "buyer_elo": 1}
 NUMERIC_EURO = [c for c in NUMERIC if c not in ("ucl_share_2y", "uel_share_2y")] + ["euro_share"]
 # talent: age, output and position can interact; platform features each act on their own
-TALENT = ["age_under_peak", "age_over_peak", "g90", "a90", "ga90"]
+TALENT = ["age_under_peak", "age_over_peak", "g90", "a90", "ga90", "ga90_pct", "g90_pct",
+          "a90_pct"]
 
 
 def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame) -> pd.DataFrame:
@@ -171,6 +174,96 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     return f, group_means
 
 
+# ---------- lines and position percentiles ----------
+
+# Transfermarkt's broad position: Attack (strikers, wingers), Midfield (defensive, central and
+# attacking midfielders), Defender (centre-backs, full-backs and wing-backs), Goalkeeper.
+# Wing-backs aren't labelled separately in either source, so they sit with full-backs.
+LINES = {"Attack": "ATT", "Midfield": "MID", "Defender": "DEF", "Goalkeeper": "GK"}
+GROUP_LINE = {"ST": "ATT", "W": "ATT", "AM": "MID", "CM": "MID", "DM": "MID", "CB": "DEF",
+              "FB": "DEF", "GK": "GK"}
+PCT_FEATURES = {"ga90": "ga90_pct", "g90": "g90_pct", "a90": "a90_pct",
+                "share_best": "share_pct"}
+
+
+def add_percentiles(f: pd.DataFrame, ref: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """Rank each player against his own position group: 'how good for a striker', not
+    against centre-backs. Reference distributions come from training and are reused."""
+    if ref is None:
+        ref = {src: {g: np.sort(f.loc[f["group"] == g, src].to_numpy(dtype=float))
+                     for g in GROUPS} for src in PCT_FEATURES}
+    for src, dst in PCT_FEATURES.items():
+        vals = np.zeros(len(f))
+        for g in GROUPS:
+            m = (f["group"] == g).to_numpy()
+            r = ref[src].get(g)
+            if m.any() and r is not None and len(r):
+                vals[m] = np.searchsorted(r, f.loc[m, src].to_numpy(dtype=float),
+                                          side="right") / len(r)
+        f[dst] = vals
+    return f, ref
+
+
+# ---------- buyer and seller ----------
+
+def money_table(transfers: pd.DataFrame) -> pd.DataFrame:
+    t = transfers[["transfer_date", "from_club_id", "to_club_id", "transfer_fee"]].copy()
+    t["date"] = pd.to_datetime(t["transfer_date"]).astype("datetime64[ns]")
+    t["fee"] = pd.to_numeric(t["transfer_fee"], errors="coerce").fillna(0)
+    return t[t["fee"] > 0].sort_values("date").reset_index(drop=True)
+
+
+def _window_sums(money: pd.DataFrame, club_col: str, clubs, dates, years: int = 3):
+    """For each (club, date): total fees and count over the years before that date."""
+    by = {c: (g["date"].to_numpy(), g["fee"].to_numpy()) for c, g in money.groupby(club_col)}
+    total, count = np.zeros(len(clubs)), np.zeros(len(clubs))
+    for i, (c, d) in enumerate(zip(clubs, dates)):
+        if pd.isna(c) or c not in by:
+            continue
+        ds, fs = by[c]
+        hi = np.searchsorted(ds, np.datetime64(d, "ns"), side="left")
+        lo = np.searchsorted(ds, np.datetime64(d, "ns") - np.timedelta64(365 * years, "D"))
+        total[i], count[i] = fs[lo:hi].sum(), hi - lo
+    return total, count
+
+
+def market_features(f: pd.DataFrame, money: pd.DataFrame, elo: pd.DataFrame,
+                    typical_buyer: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """Seller: how much and how often the player's club has sold in the last three years
+    (Benfica and Brighton sell constantly; Real Madrid almost never).
+    Buyer: what the buying club spent in the last three years and its Elo. At valuation
+    time there is no buyer, so a typical top-5 buyer from the latest season stands in."""
+    dates = pd.to_datetime(f["as_of"]).astype("datetime64[ns]").to_numpy()
+    sold, n_sold = _window_sums(money, "from_club_id", f["club_id"].to_numpy(), dates)
+    f["seller_sales_3y"] = np.log1p(sold / 1e6)
+    f["seller_sales_n_3y"] = n_sold
+    if "buyer_id" in f and f["buyer_id"].notna().any():
+        spent, _ = _window_sums(money, "to_club_id", f["buyer_id"].to_numpy(), dates)
+        f["buyer_spend_3y"] = np.log1p(spent / 1e6)
+        left = pd.DataFrame({"club_id": pd.to_numeric(f["buyer_id"], errors="coerce")
+                             .astype(float), "as_of": dates, "_i": np.arange(len(f))})
+        right = elo.rename(columns={"tm_club_id": "club_id", "date": "as_of"})
+        right = right.assign(club_id=right["club_id"].astype(float),
+                             as_of=pd.to_datetime(right["as_of"]).astype("datetime64[ns]"))
+        be = pd.merge_asof(left.sort_values("as_of"), right.sort_values("as_of"),
+                           on="as_of", by="club_id", direction="backward")
+        f["buyer_elo"] = be.sort_values("_i")["elo_post"].to_numpy()
+    if typical_buyer is None:
+        latest = f["year"].max()
+        recent = f[f["year"] == latest]
+        typical_buyer = {"buyer_spend_3y": float(recent["buyer_spend_3y"].median()),
+                         "buyer_elo": float(recent["buyer_elo"].median())}
+    if "buyer_id" not in f or f["buyer_id"].isna().all():
+        f["buyer_spend_3y"] = typical_buyer["buyer_spend_3y"]
+        f["buyer_elo"] = typical_buyer["buyer_elo"]
+    f["elo_gap"] = f["buyer_elo"] - f["club_elo"]
+    return f, typical_buyer
+
+
+MARKET = ["buyer_spend_3y", "buyer_elo", "seller_sales_3y", "seller_sales_n_3y", "elo_gap"]
+PCTS = list(PCT_FEATURES.values())
+
+
 def design_matrix(f: pd.DataFrame, numeric: list[str] | None = None) -> pd.DataFrame:
     X = f[numeric or NUMERIC].astype(float).copy()
     for g in GROUPS:
@@ -185,7 +278,11 @@ def monotone_constraints(columns: list[str]) -> tuple[int, ...]:
 
 
 def additive_platform(columns: list[str]) -> list[list[str]]:
-    """Interaction constraints: talent features and positions may interact; every other
-    feature (playing share, Europe, league, club Elo, season) only adds on its own."""
-    talent = [c for c in columns if c in TALENT or c.startswith("pos_")]
-    return [talent] + [[c] for c in columns if c not in talent]
+    """Interaction constraints. Talent features (age, output) interact with position.
+    Every platform feature (playing share, Europe, league, club Elo, buyer, season) acts on
+    its own but is still shaped by position, so a keeper's full season at a big club isn't
+    worth a striker's (v1.5 gave both the same boost, which overvalued keepers). Platform
+    features never compound with each other."""
+    pos = [c for c in columns if c.startswith("pos_")]
+    talent = [c for c in columns if c in TALENT] + pos
+    return [talent] + [[c] + pos for c in columns if c not in talent]

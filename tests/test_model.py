@@ -249,3 +249,63 @@ def test_low_confidence_flags_extrapolation(trained):
     assert not normal["low_confidence"].iloc[0] or normal["p50"].iloc[0] > r["dense_max"]
     assert wild["low_confidence"].iloc[0]
     assert r["dense_max"] < r["cap"]
+
+
+def test_percentiles_are_within_position():
+    import pandas as pd
+
+    from mercato.model.features import add_percentiles
+    f = pd.DataFrame({"group": ["ST", "ST", "ST", "CB", "CB"],
+                      "ga90": [0.2, 0.5, 0.8, 0.05, 0.15], "g90": 0.0, "a90": 0.0,
+                      "share_best": [0.5, 0.6, 0.7, 0.8, 0.9]})
+    out, ref = add_percentiles(f.copy())
+    # the best centre-back scorer tops his group even with far fewer goals than any striker
+    assert out.loc[4, "ga90_pct"] == 1.0 and out.loc[0, "ga90_pct"] < out.loc[4, "ga90_pct"]
+    new = pd.DataFrame({"group": ["ST"], "ga90": [0.6], "g90": 0.0, "a90": 0.0,
+                        "share_best": [0.65]})
+    assert add_percentiles(new, ref)[0]["ga90_pct"].iloc[0] == pytest.approx(2 / 3)
+
+
+def test_market_features_windows_and_typical_buyer():
+    import pandas as pd
+
+    from mercato.model.features import market_features, money_table
+    tr = pd.DataFrame({"transfer_date": ["2020-08-01", "2022-09-01", "2024-08-01", "2025-01-10"],
+                       "from_club_id": [1, 1, 1, 2], "to_club_id": [9, 9, 9, 9],
+                       "transfer_fee": [30e6, 20e6, 10e6, 0]})
+    elo = pd.DataFrame({"tm_club_id": [9, 1], "date": ["2024-01-01", "2024-01-01"],
+                        "elo_post": [1900.0, 1600.0]})
+    f = pd.DataFrame({"as_of": ["2025-08-01"], "club_id": [1], "buyer_id": [9],
+                      "club_elo": [1600.0], "year": [2025]})
+    out, typical = market_features(f.copy(), money_table(tr), elo)
+    # seller sold 20m + 10m in the three years before (the 2020 sale is too old)
+    assert out["seller_sales_n_3y"].iloc[0] == 2
+    assert out["seller_sales_3y"].iloc[0] == pytest.approx(np.log1p(30))
+    assert out["buyer_spend_3y"].iloc[0] == pytest.approx(np.log1p(30))
+    assert out["elo_gap"].iloc[0] == pytest.approx(300)
+    # a current player (no buyer) is valued against the typical buyer
+    cur = pd.DataFrame({"as_of": ["2026-06-01"], "club_id": [1], "club_elo": [1650.0],
+                        "year": [2025]})
+    out2, _ = market_features(cur, money_table(tr), elo, typical)
+    assert out2["buyer_elo"].iloc[0] == typical["buyer_elo"]
+
+
+def test_lines_follow_transfermarkt():
+    from mercato.model.features import GROUP_LINE, LINES
+    assert LINES["Attack"] == "ATT" and LINES["Defender"] == "DEF"
+    assert GROUP_LINE["AM"] == "MID" and GROUP_LINE["FB"] == "DEF" and GROUP_LINE["W"] == "ATT"
+
+
+def test_metrics_by_line(trained):
+    _, _, r = trained
+    assert set(r["metrics"]["mdape_by_line"]) <= {"ATT", "MID", "DEF", "GK"}
+    assert r["metrics"]["mdape_by_line"]
+
+
+def test_position_shapes_every_platform_feature():
+    from mercato.model.features import additive_platform
+    cols = ["age_under_peak", "ga90", "share_best", "club_elo", "pos_GK", "pos_ST"]
+    groups = additive_platform(cols)
+    assert ["share_best", "pos_GK", "pos_ST"] in groups and ["club_elo", "pos_GK", "pos_ST"] in groups
+    # platform features never share a group with each other
+    assert not any("share_best" in g and "club_elo" in g for g in groups)
