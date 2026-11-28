@@ -276,7 +276,9 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
         # now vs later: the share of the value index from this season's level
         disc = result["delta"] ** np.arange(P.shape[1])
         terms = np.where(np.isnan(P), 0.0, disc * np.exp(result["beta"] * np.nan_to_num(P)))
-        now = terms[:, 0] / terms.sum(axis=1)
+        total = terms.sum(axis=1)
+        # players already past the last counted age have no seasons left: all current level
+        now = np.divide(terms[:, 0], total, out=np.ones(len(total)), where=total > 0)
         v["drivers"] = [{"current_level": float(round(p * n, -4)),
                          "projected_years": float(round(p * (1 - n), -4))}
                         for p, n in zip(v["p50"], now)]
@@ -291,7 +293,9 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
         for comp, row in zip(v["components"], proj):
             comp["projected_rating"] = [None if np.isnan(x) else round(float(x), 1)
                                         for x in row[1:]]
-        v["projected_peak"] = np.nanmax(proj, axis=1)
+        has = ~np.isnan(proj).all(axis=1)
+        v["projected_peak"] = np.nan
+        v.loc[has, "projected_peak"] = np.nanmax(proj[has], axis=1)
     return v
 
 
