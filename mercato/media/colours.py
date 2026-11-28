@@ -8,12 +8,13 @@ db/overrides/colours.csv, which always wins.
 import colorsys
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 PALETTE = 6
 MIN_SHARE = 0.08      # a colour must cover this much of the crest to count
 MIN_SAT = 0.25        # below this a colour is white, black or grey
 MIN_DISTANCE = 80     # RGB distance between primary and secondary
+BORDER = 0.12         # share of the crest's width treated as its outline and ignored
 
 
 def _hex(rgb) -> str:
@@ -33,7 +34,16 @@ def palette(img: Image.Image) -> list[tuple[tuple[int, int, int], float]]:
     """Main colours of the visible pixels, with their share, most common first."""
     img = img.convert("RGBA")
     img.thumbnail((120, 120))
-    pixels = [p[:3] for p in img.get_flattened_data() if p[3] >= 200]
+    alpha = img.getchannel("A").point(lambda a: 255 if a >= 200 else 0)
+    # ignore the outer ring: gold and yellow outlines read as the main colour otherwise
+    # (Barcelona came out gold and red, Arsenal brown)
+    k = max(3, int(BORDER * min(img.size)) | 1)
+    inner = alpha.filter(ImageFilter.MinFilter(k))
+    data = list(img.get_flattened_data())
+    keep = [p[:3] for p, a in zip(data, inner.get_flattened_data()) if a]
+    if len(keep) < 0.25 * sum(1 for a in alpha.get_flattened_data() if a):
+        keep = [p[:3] for p, a in zip(data, alpha.get_flattened_data()) if a]
+    pixels = keep
     if not pixels:
         return []
     small = Image.new("RGB", (len(pixels), 1))

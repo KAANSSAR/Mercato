@@ -1,1 +1,152 @@
 kind,name,primary,secondary
+club,Arsenal FC,#EF0107,#FFFFFF
+club,Aston Villa,#670E36,#95BFE5
+club,AFC Bournemouth,#DA291C,#000000
+club,Brentford FC,#E30613,#FFFFFF
+club,Brighton & Hove Albion,#0057B8,#FFFFFF
+club,Burnley FC,#6C1D45,#99D6EA
+club,Chelsea FC,#034694,#FFFFFF
+club,Crystal Palace,#1B458F,#C4122E
+club,Everton FC,#003399,#FFFFFF
+club,Fulham FC,#FFFFFF,#000000
+club,Leeds United,#FFFFFF,#1D428A
+club,Liverpool FC,#C8102E,#FFFFFF
+club,Manchester City,#6CABDD,#1C2C5B
+club,Manchester United,#DA291C,#FBE122
+club,Newcastle United,#241F20,#FFFFFF
+club,Nottingham Forest,#DD0000,#FFFFFF
+club,Sunderland AFC,#EB172B,#FFFFFF
+club,Tottenham Hotspur,#FFFFFF,#132257
+club,West Ham United,#7A263A,#1BB1E7
+club,Wolverhampton Wanderers,#FDB913,#231F20
+club,Leicester City,#003090,#FDBE11
+club,Ipswich Town,#0044A9,#FFFFFF
+club,Southampton FC,#D71920,#FFFFFF
+club,Coventry City,#59CBE8,#FFFFFF
+club,FC Barcelona,#004D98,#A50044
+club,Real Madrid,#FFFFFF,#FEBE10
+club,Atlético de Madrid,#CB3524,#272E61
+club,Athletic Bilbao,#EE2523,#FFFFFF
+club,Real Sociedad,#0067B1,#FFFFFF
+club,Villarreal CF,#FFE667,#005187
+club,Real Betis Balompié,#00954C,#FFFFFF
+club,Sevilla FC,#FFFFFF,#D81E05
+club,Valencia CF,#FFFFFF,#EE7203
+club,Celta de Vigo,#8AC3EE,#FFFFFF
+club,Getafe CF,#005999,#FFFFFF
+club,CA Osasuna,#D91A21,#0A346F
+club,RCD Mallorca,#E20613,#000000
+club,Rayo Vallecano,#FFFFFF,#E53027
+club,Deportivo Alavés,#0761AF,#FFFFFF
+club,RCD Espanyol Barcelona,#007FC8,#FFFFFF
+club,Girona FC,#CD2534,#FFFFFF
+club,Elche CF,#FFFFFF,#05642C
+club,Levante UD,#B4053F,#005BA6
+club,Real Oviedo,#0033A0,#FFFFFF
+club,UD Las Palmas,#FFE400,#0068B3
+club,CD Leganés,#0058A6,#FFFFFF
+club,Real Valladolid CF,#921B88,#FFFFFF
+club,Racing Santander,#FFFFFF,#00804A
+club,Deportivo de La Coruña,#0D4C9D,#FFFFFF
+club,Inter Milan,#0068A8,#000000
+club,AC Milan,#FB090B,#000000
+club,Juventus FC,#000000,#FFFFFF
+club,SSC Napoli,#12A0D7,#FFFFFF
+club,AS Roma,#8E1F2F,#F0BC42
+club,SS Lazio,#87D8F7,#FFFFFF
+club,Atalanta BC,#1E71B8,#000000
+club,ACF Fiorentina,#482E92,#FFFFFF
+club,Bologna FC 1909,#1A2F48,#A21C26
+club,Torino FC,#8A1E03,#FFFFFF
+club,Udinese Calcio,#000000,#FFFFFF
+club,Genoa CFC,#AD1919,#001D4F
+club,Como 1907,#003B71,#FFFFFF
+club,US Lecce,#FFDD00,#E2001A
+club,Cagliari Calcio,#A6192E,#002350
+club,Parma Calcio 1913,#FFD200,#1B3B8C
+club,Hellas Verona,#002F6C,#FFD700
+club,US Sassuolo,#00A752,#000000
+club,US Cremonese,#C8102E,#808080
+club,Pisa Sporting Club,#000000,#0D2C6C
+club,FC Empoli,#00579C,#FFFFFF
+club,AC Monza,#E10600,#FFFFFF
+club,Venezia FC,#000000,#F98100
+club,Bayern Munich,#DC052D,#0066B2
+club,Borussia Dortmund,#FDE100,#000000
+club,Bayer 04 Leverkusen,#E32221,#000000
+club,RB Leipzig,#DD0741,#FFFFFF
+club,Eintracht Frankfurt,#E1000F,#000000
+club,VfB Stuttgart,#E32219,#FFFFFF
+club,SC Freiburg,#E2001A,#000000
+club,VfL Wolfsburg,#65B32E,#FFFFFF
+club,Borussia Mönchengladbach,#000000,#00A651
+club,1.FC Union Berlin,#EB1923,#FFFFFF
+club,TSG 1899 Hoffenheim,#1961B5,#FFFFFF
+club,SV Werder Bremen,#1D9053,#FFFFFF
+club,1.FSV Mainz 05,#C3141E,#FFFFFF
+club,FC Augsburg,#BA3733,#46714D
+club,1.FC Heidenheim 1846,#E2001A,#003B79
+club,FC St. Pauli,#624839,#FFFFFF
+club,1.FC Köln,#ED1C24,#FFFFFF
+club,Hamburger SV,#0A3F86,#FFFFFF
+club,VfL Bochum,#005CA9,#FFFFFF
+club,Holstein Kiel,#00428B,#FFFFFF
+club,FC Schalke 04,#004D9D,#FFFFFF
+club,SV Elversberg,#000000,#FFFFFF
+club,Paris Saint-Germain,#004170,#DA291C
+club,Olympique de Marseille,#2FAEE0,#FFFFFF
+club,AS Monaco,#E7192A,#FFFFFF
+club,LOSC Lille,#E01E13,#20325F
+club,Olympique Lyon,#FFFFFF,#1B2A75
+club,OGC Nice,#E30613,#000000
+club,RC Lens,#FFE600,#E30613
+club,Stade Rennais FC,#E13327,#000000
+club,Stade Brestois 29,#E3001B,#FFFFFF
+club,RC Strasbourg Alsace,#009FE3,#FFFFFF
+club,FC Nantes,#FCD405,#00A85A
+club,Toulouse FC,#6B4C9A,#FFFFFF
+club,AJ Auxerre,#FFFFFF,#0B4C9E
+club,Angers SCO,#000000,#FFFFFF
+club,Le Havre AC,#6CABDD,#1D2C5B
+club,FC Lorient,#F58113,#000000
+club,Paris FC,#0A2240,#7FB3E1
+club,FC Metz,#870E26,#FFFFFF
+club,Montpellier HSC,#F26D21,#003875
+club,AS Saint-Étienne,#009639,#FFFFFF
+club,Stade de Reims,#E3001B,#FFFFFF
+club,ESTAC Troyes,#00539F,#FFFFFF
+club,SL Benfica,#E20E0E,#FFFFFF
+club,FC Porto,#00428C,#FFFFFF
+club,Sporting CP,#008057,#FFFFFF
+club,Ajax Amsterdam,#D2122E,#FFFFFF
+club,PSV Eindhoven,#ED1C24,#FFFFFF
+club,Feyenoord Rotterdam,#E30613,#FFFFFF
+club,Celtic FC,#018749,#FFFFFF
+club,Rangers FC,#1B458F,#FFFFFF
+club,Galatasaray,#A90432,#FDB912
+club,Fenerbahce,#FFED00,#002D72
+club,Besiktas JK,#000000,#FFFFFF
+club,Club Brugge KV,#0078C1,#000000
+club,Red Bull Salzburg,#D50032,#FFFFFF
+club,Shakhtar Donetsk,#F18A00,#000000
+nation,Netherlands,#F36C21,#FFFFFF
+nation,Italy,#0066CC,#FFFFFF
+nation,Germany,#FFFFFF,#000000
+nation,France,#002395,#ED2939
+nation,Brazil,#FEDD00,#009C3B
+nation,Argentina,#75AADB,#FFFFFF
+nation,England,#FFFFFF,#00247D
+nation,Portugal,#C8102E,#006600
+nation,Spain,#C60B1E,#FFC400
+nation,Belgium,#E30613,#000000
+nation,Japan,#0A2A6B,#FFFFFF
+nation,Australia,#FFCD00,#00843D
+nation,Uruguay,#5CBFEB,#000000
+nation,Scotland,#00205B,#FFFFFF
+nation,Croatia,#FF0000,#FFFFFF
+nation,Mexico,#006847,#CE1126
+club,Sport Lisboa e Benfica,#E20E0E,#FFFFFF
+club,Sporting Clube de Portugal,#008057,#FFFFFF
+club,Futebol Clube do Porto,#00428C,#FFFFFF
+club,Paris Saint-Germain Football Club,#004170,#DA291C
+club,Associazione Sportiva Roma,#8E1F2F,#F0BC42

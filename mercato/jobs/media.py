@@ -76,12 +76,39 @@ def auth_headers(key: str) -> dict:
     return {"apikey": key, "Authorization": f"Bearer {key}"}
 
 
+# leagues whose clubs the curated list covers (top 5, the usual European sides)
+CURATED_LEAGUES = {"GB1", "ES1", "IT1", "L1", "FR1", "PO1", "NL1", "BE1", "TR1", "SC1",
+                   "GR1", "DK1", "RU1", "UKR1", "A1"}
+MATCH = 90
+
+
 def overrides() -> dict:
-    if not OVERRIDES.exists():
-        return {}
-    with OVERRIDES.open() as f:
-        return {(r["kind"], r["name"]): (r["primary"] or None, r["secondary"] or None)
-                for r in csv.DictReader(f)}
+    """{"club": {name: (primary, secondary)}, "nation": {...}}"""
+    out = {"club": {}, "nation": {}}
+    if OVERRIDES.exists():
+        with OVERRIDES.open() as f:
+            for r in csv.DictReader(f):
+                out[r["kind"]][r["name"]] = (r["primary"] or None, r["secondary"] or None)
+    return out
+
+
+def club_override(name: str, league: str | None, curated: dict):
+    """The curated colours for a club, matched by name, only for clubs in the leagues the
+    list covers (so Inter Miami never picks up Inter's colours). Exact names win; otherwise
+    the closest name above MATCH, ties broken by plain similarity (Inter vs AC Milan)."""
+    if name in curated:
+        return curated[name]
+    if league not in CURATED_LEAGUES:
+        return None
+    from rapidfuzz import fuzz
+
+    from mercato.mapping.names import club_key, club_similarity
+    best, score = None, (0.0, 0.0)
+    for cname, colours in curated.items():
+        sc = (club_similarity(name, cname), fuzz.ratio(club_key(name), club_key(cname)))
+        if sc > score:
+            best, score = colours, sc
+    return best if score[0] >= MATCH else None
 
 
 def run(refresh: bool = False, dry: bool = False, limit: int | None = None) -> dict:
@@ -92,24 +119,26 @@ def run(refresh: bool = False, dry: bool = False, limit: int | None = None) -> d
     new_only = "" if refresh else " and {col} is null"
     with connect() as conn, job_run(conn, "media") as stats, conn.cursor() as cur:
         # clubs: crest and colours
-        cur.execute("select id, name, api_football_id from clubs where api_football_id is not null"
+        cur.execute("select id, name, api_football_id, tm_competition from clubs "
+                    "where api_football_id is not null"
                     + new_only.format(col="logo_url") + " order by id" +
                     (f" limit {int(limit)}" if limit else ""))
         clubs = cur.fetchall()
-        for cid, name, api in clubs:
+        for cid, name, api, league in clubs:
             src = f"{SOURCE}/teams/{api}.png"
             data = m.get(src)
             if data is None:
                 continue
-            p, s = manual.get(("club", name)) or from_bytes(data)
-            how = "manual" if ("club", name) in manual else "crest"
+            curated = club_override(name, league, manual["club"])
+            p, s = curated or from_bytes(data)
+            how = "manual" if curated else "crest"
             url = m.keep(f"clubs/{cid}.png", data, src)
             if not dry:
                 cur.execute("update clubs set logo_url = %s, colour_primary = %s, "
                             "colour_secondary = %s, colours_from = %s where id = %s",
                             (url, p, s, how, cid))
             else:
-                print(f"  {name}: {p} {s}")
+                print(f"  {name}: {p} {s} ({how})")
 
         # competitions: crest
         cur.execute("select id, api_football_id from competitions"
@@ -130,8 +159,8 @@ def run(refresh: bool = False, dry: bool = False, limit: int | None = None) -> d
             if code is None:
                 unknown.append(name)
                 continue
-            if ("nation", name) in manual:
-                (p, s), how = manual[("nation", name)], "manual"
+            if name in manual["nation"]:
+                (p, s), how = manual["nation"][name], "manual"
             else:
                 data = m.get(FLAGS.format(code=code))
                 (p, s), how = (from_bytes(data) if data else (None, None)), "flag"
