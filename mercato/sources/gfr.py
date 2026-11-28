@@ -66,7 +66,8 @@ def scrape(timeout_ms: int = 60_000) -> dict:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=USER_AGENT)
         for kind, url in PAGES.items():
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # not "networkidle": their ads and analytics never go quiet
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             path = "leagues" if kind == "leagues" else "teams"
             page.wait_for_function(
                 f"document.querySelectorAll('main a[href*=\"/rankings/{path}/men/\"]').length"
