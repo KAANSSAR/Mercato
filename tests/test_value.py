@@ -213,3 +213,14 @@ def test_current_season_always_counts_and_youth_gets_its_prime():
     li = log_index(P, 0.75, 0.9)
     assert np.isfinite(li[0]) and li[0] > log_index(P * 0 - 5, 0.75, 0.9)[0]
     assert li[1] > li[2]  # same level: 20-year-old has his prime ahead
+
+
+def test_replacement_level_lets_a_few_elite_seasons_beat_many_average_ones():
+    from mercato.model.projection import log_index
+    nan = np.nan
+    vvd = np.array([[0.8, 0.0, -0.3] + [nan] * 18])       # 35, good now, two more seasons
+    young = np.array([[0.0] * 21])                          # average for twenty seasons
+    no = log_index(np.vstack([vvd, young]), 0.5, 0.8)
+    yes = log_index(np.vstack([vvd, young]), 0.5, 0.8, repl=0.0)
+    assert no[0] < no[1]   # without: the average career wins
+    assert yes[0] > yes[1]  # with: the elite seasons do

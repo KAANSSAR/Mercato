@@ -50,6 +50,7 @@ from mercato.model.projection import (
     fit_preferences,
     log_index,
     project,
+    season_terms,
     snapshot_rows,
 )
 from mercato.model.rating import COMPONENTS, _pct, game_features, rate, team_games
@@ -67,7 +68,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.7"
+VERSION = "v2.8"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -204,20 +205,21 @@ def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
             # prices for today's regulars (two numbers for everyone, never per player)
             reg = regulars(pool.assign(line=pool["group"].map(GROUP_LINE))).to_numpy()
             Pp = project(pool[reg], paths)
-            beta, delta, rho = fit_preferences(
+            beta, delta, repl, rho = fit_preferences(
                 Pp, pool.loc[reg, "group"].map(GROUP_LINE).to_numpy(),
                 np.log(pool.loc[reg, "tm_value"].to_numpy(float)))
         else:
-            beta, delta, rho = fit_preferences(P[trva], line[trva], y[trva])
-        li = log_index(P, beta, delta)
+            beta, delta, repl, rho = fit_preferences(P[trva], line[trva], y[trva])
+        li = log_index(P, beta, delta, repl)
         X = _ols_x(li, line)
         c_tr = np.linalg.lstsq(X[tr], y[tr], rcond=None)[0]
         band = residual_band(y[va], X[va] @ c_tr)
         c_eval = np.linalg.lstsq(X[trva], y[trva], rcond=None)[0]
         log_te = X[te] @ c_eval
         coef = np.linalg.lstsq(X, y, rcond=None)[0]
-        result |= {"paths": paths, "beta": beta, "delta": delta, "ols": coef}
-        metrics |= {"snapshots": len(snaps), "beta": beta, "delta": delta, "prefs": prefs,
+        result |= {"paths": paths, "beta": beta, "delta": delta, "repl": repl, "ols": coef}
+        metrics |= {"snapshots": len(snaps), "beta": beta, "delta": delta, "repl": repl,
+                    "prefs": prefs,
                     "prefs_rank_corr": round(rho, 3),
                     "fee_rank_corr_test": round(float(spearmanr(li[te], y[te])[0]), 3)}
     else:
@@ -248,7 +250,7 @@ def raw_value(f: pd.DataFrame, result: dict) -> tuple[np.ndarray, np.ndarray | N
     """Log raw value before the euro scale, and the projected path (projection only)."""
     if result["method"] == "projection":
         P = project(f, result["paths"])
-        li = log_index(P, result["beta"], result["delta"])
+        li = log_index(P, result["beta"], result["delta"], result.get("repl"))
         return _ols_x(li, f["group"].map(GROUP_LINE).to_numpy()) @ result["ols"], P
     support, slope = result["age_rule"]
     return (result["model"].predict(design(f))
@@ -295,8 +297,7 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
         v["drivers"] = drivers(result["model"], design(pool), v["p50"], slope)
     else:
         # now vs later: the share of the value index from this season's level
-        disc = result["delta"] ** np.arange(P.shape[1])
-        terms = np.where(np.isnan(P), 0.0, disc * np.exp(result["beta"] * np.nan_to_num(P)))
+        terms = season_terms(P, result["beta"], result["delta"], result.get("repl"))
         total = terms.sum(axis=1)
         # players already past the last counted age have no seasons left: all current level
         now = np.divide(terms[:, 0], total, out=np.ones(len(total)), where=total > 0)
@@ -459,7 +460,7 @@ def save(result: dict, values: pd.DataFrame) -> dict:
         result["model"].save_model(out / "curve.json")
         method = {"age_rule": result["age_rule"]}
     else:
-        method = {"beta": result["beta"], "delta": result["delta"],
+        method = {"beta": result["beta"], "delta": result["delta"], "repl": result["repl"],
                   "ols": list(map(float, result["ols"])),
                   "paths": {ln: {k: list(map(float, c)) for k, c in by.items()}
                             for ln, by in result["paths"]["coefs"].items()},

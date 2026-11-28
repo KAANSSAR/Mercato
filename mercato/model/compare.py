@@ -20,7 +20,8 @@ from mercato.model.train import prepare as prepare_v1
 REFERENCE = ["Morgan Rogers", "Cole Palmer", "Florian Wirtz", "Bukayo Saka", "Erling Haaland",
              "Lamine Yamal", "Kylian Mbappé", "Hugo Ekitiké", "Ryan Gravenberch", "Declan Rice",
              "David Raya", "Joan García", "Harry Kane", "Viktor Gyökeres", "Wouter Burger",
-             "Juan Iglesias"]
+             "Juan Iglesias", "Virgil van Dijk", "Thibaut Courtois", "Bruno Fernandes",
+             "Raphinha"]
 
 
 def without(component: str) -> dict:
@@ -34,9 +35,8 @@ def without(component: str) -> dict:
 
 
 V2_VARIANTS = {
-    "v2.7": {},
-    "v2.7 fee prefs": {"prefs": "fees"},
-    "v2.7 no team level": {"weights": without("team_level")},
+    "v2.8": {},
+    "v2.8 fee prefs": {"prefs": "fees"},
 }
 
 
@@ -68,7 +68,7 @@ def main():
         r = v2.fit(prep, verbose=False, **kw)
         values[name] = r["values"]
         if kw.get("method", "projection") == "projection":
-            print("  ", {k: r["metrics"][k] for k in ("beta", "delta", "prefs_rank_corr",
+            print("  ", {k: r["metrics"][k] for k in ("beta", "delta", "repl", "prefs_rank_corr",
                                                       "fee_rank_corr_test", "fee_mdape_test")})
 
     for name, v in values.items():
@@ -80,7 +80,7 @@ def main():
                             for ln, x in c["by_line"].items()}}
         by_name = unique_names(v).reindex(REFERENCE)
         refs[name] = by_name["p50"].map(eur)
-        if name == "v2.7":
+        if name == "v2.8":
             ratings = by_name[["rating", "age"]].round(1)
     refs["TM value"] = by_name["tm_value"].map(eur)
     refs["rating"], refs["age"] = ratings["rating"], ratings["age"]

@@ -21,7 +21,7 @@ at six seasons, which is a 30-year-old's whole career but stops a 20-year-old at
 before his prime, so Kane came out far above Transfermarkt and Hato far below.
 
 beta: how much an elite season is worth next to a good one. delta: how much later years
-count next to now. Both are fitted on real fees (the only thing fees decide); everything
+count next to now. repl: the replacement level; only the part of a season above it counts. Both are fitted on real fees (the only thing fees decide); everything
 else is on-pitch data. No future season counts past age 37; the current one always does.
 
 Replaces the age curve learned from fees, where value fell off a cliff after 26 because
@@ -48,6 +48,8 @@ MIN_PAIRS = 60
 LINES = ("ATT", "MID", "DEF", "GK")
 BETAS = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
 DELTAS = (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0)
+REPLS = (None, -0.5, -0.25, 0.0, 0.25, 0.5)  # replacement level, in score units
+REPL_SLIVER = 0.05
 
 
 def snapshot_rows(apps: pd.DataFrame, clubs: pd.DataFrame, info: pd.DataFrame,
@@ -129,21 +131,36 @@ def project(f: pd.DataFrame, paths: dict) -> np.ndarray:
     return out
 
 
-def log_index(path: np.ndarray, beta: float, delta: float) -> np.ndarray:
+def season_terms(path: np.ndarray, beta: float, delta: float,
+                 repl: float | None = None) -> np.ndarray:
+    """What each projected season is worth, discounted. With a replacement level, only the
+    part of a season above it counts (any club can find an average season cheaply), plus a
+    sliver of the whole season so players below it still have an order. Without one, long
+    careers of average seasons outweighed a few elite ones (Van Dijk €2m at 35)."""
     disc = delta ** np.arange(path.shape[1])
-    terms = np.where(np.isnan(path), 0.0, disc * np.exp(beta * np.nan_to_num(path)))
+    worth = np.exp(beta * np.nan_to_num(path))
+    if repl is not None:
+        worth = np.maximum(worth - np.exp(beta * repl), 0.0) + REPL_SLIVER * worth
+    return np.where(np.isnan(path), 0.0, disc * worth)
+
+
+def log_index(path: np.ndarray, beta: float, delta: float,
+              repl: float | None = None) -> np.ndarray:
+    terms = season_terms(path, beta, delta, repl)
     return np.log(np.maximum(terms.sum(axis=1), 1e-12))
 
 
 def fit_preferences(path: np.ndarray, line: np.ndarray, y: np.ndarray) -> tuple:
-    """beta and delta that best order real (inflation-adjusted) fees within each line."""
-    best, score = (1.0, 0.8), -np.inf
-    for b in BETAS:
-        for dl in DELTAS:
-            li = log_index(path, b, dl)
-            rho = [(spearmanr(li[m], y[m])[0], m.sum()) for ln in LINES
-                   if (m := line == ln).sum() >= 20]
-            s = sum(r * n for r, n in rho) / max(sum(n for _, n in rho), 1)
-            if s > score:
-                best, score = (b, dl), s
-    return best[0], best[1], float(score)
+    """beta, delta and the replacement level that best order y (market values or fees)
+    within each line. Three numbers for the whole market, never per player."""
+    best, score = (1.0, 0.8, None), -np.inf
+    for rp in REPLS:
+        for b in BETAS:
+            for dl in DELTAS:
+                li = log_index(path, b, dl, rp)
+                rho = [(spearmanr(li[m], y[m])[0], m.sum()) for ln in LINES
+                       if (m := line == ln).sum() >= 20]
+                s = sum(r * n for r, n in rho) / max(sum(n for _, n in rho), 1)
+                if s > score:
+                    best, score = (b, dl, rp), s
+    return best[0], best[1], best[2], float(score)
