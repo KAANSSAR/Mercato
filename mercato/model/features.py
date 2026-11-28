@@ -4,13 +4,15 @@ For each (player, as_of date) we look at the last three seasons, so injured seas
 don't erase a player (v1 read Rodri's ACL year as decline; two seasons wasn't enough
 either, since he was in and out after it):
 
-- level: the best of the last three years for minutes and minutes share
-- recency: minutes in the last year, unconstrained, so genuine decline still shows
+- level: the best of the last three years for share of his club's minutes
+- recency: share of his club's minutes in the last year, unconstrained, so genuine
+  decline still shows
 - goals, assists and goal involvements per 90 over three years weighted 1, 0.75, 0.5
   towards the recent, each goal or assist weighted by the opponent's Elo, then shrunk
   towards his position's average for small samples
-- Champions League and Europa League minutes over two years (proven at the top level)
-- top-5 league minutes over two years, his club's Elo, the league he plays in
+- share of a full Champions League and Europa League run over two years, capped at one
+  (proven at the top level, without rewarding sheer volume)
+- share of top-5 league minutes over two years, capped at one, his club's Elo, the league
 - age as years under and over 27, so value has to fall past the peak even where
   there are almost no fees to learn from (v1 valued a 38-year-old like a 33-year-old)
 - position group
@@ -31,12 +33,15 @@ LEAGUES = TOP5 + ["other"]
 PEAK_AGE = 27.0
 YEARS = 3
 RECENCY = (1.0, 0.75, 0.5)  # weights for last year, the year before, and the one before that
-NUMERIC = ["age_under_peak", "age_over_peak", "minutes_best", "minutes_1y", "share_best",
-           "apps_1y", "g90", "a90", "ga90", "ucl_minutes_2y", "uel_minutes_2y",
-           "top5_minutes_2y", "club_elo", "year"]
-MONOTONE = {"minutes_best": 1, "share_best": 1, "g90": 1, "a90": 1, "ga90": 1,
-            "ucl_minutes_2y": 1, "top5_minutes_2y": 1, "club_elo": 1,
-            "age_over_peak": -1}
+# Playing time is counted once, as shares, not as four stacked raw totals: v1.3 added
+# best-season, top-5 and Champions League minutes on top of each other, so an ironman like
+# Morgan Rogers hit the cap on volume alone while his output per 90 trailed Palmer's.
+LEAGUE_SEASON_MINUTES = 38 * 90
+EURO_RUN_MINUTES = 1200  # roughly one full Champions League or Europa League campaign
+NUMERIC = ["age_under_peak", "age_over_peak", "share_best", "share_1y", "top5_share_2y",
+           "ucl_share_2y", "uel_share_2y", "g90", "a90", "ga90", "club_elo", "year"]
+MONOTONE = {"share_best": 1, "top5_share_2y": 1, "ucl_share_2y": 1, "g90": 1, "a90": 1,
+            "ga90": 1, "club_elo": 1, "age_over_peak": -1}
 
 
 def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame) -> pd.DataFrame:
@@ -144,9 +149,13 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     shares = [np.where(f[f"club_games_y{k}"] > 0,
                        f[f"minutes_y{k}"] / (90 * f[f"club_games_y{k}"].clip(lower=1)), 0)
               for k in range(YEARS)]
-    f["share_best"] = np.clip(np.maximum.reduce(shares), 0, 1)
+    f["share_best"] = np.clip(np.maximum.reduce(shares), 0, 1)  # availability at his best
+    f["share_1y"] = np.clip(shares[0], 0, 1)                    # recency, unconstrained
     f["minutes_best"] = np.maximum.reduce([f[f"minutes_y{k}"] for k in range(YEARS)])
     f["minutes_1y"] = f["minutes_y0"]
+    f["top5_share_2y"] = (f["top5_minutes_2y"] / (2 * LEAGUE_SEASON_MINUTES)).clip(0, 1)
+    f["ucl_share_2y"] = (f["ucl_minutes_2y"] / EURO_RUN_MINUTES).clip(0, 1)
+    f["uel_share_2y"] = (f["uel_minutes_2y"] / EURO_RUN_MINUTES).clip(0, 1)
     birth = pd.to_datetime(f["birth"])
     f["age"] = (pd.to_datetime(f["as_of"]) - birth).dt.days / 365.25
     f["age_under_peak"] = (PEAK_AGE - f["age"]).clip(lower=0)

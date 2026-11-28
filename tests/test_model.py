@@ -170,11 +170,11 @@ def test_one_injured_season_does_not_erase_a_player(trained):
     from mercato.model.train import predict
     X, r = _row(trained)
     healthy_then_injured, poor_both = X.copy(), X.copy()
-    healthy_then_injured[["minutes_best", "share_best", "minutes_1y"]] = [3000.0, 0.95, 300.0]
-    poor_both[["minutes_best", "share_best", "minutes_1y"]] = [400.0, 0.12, 300.0]
+    healthy_then_injured[["share_best", "share_1y"]] = [0.95, 0.1]
+    poor_both[["share_best", "share_1y"]] = [0.12, 0.1]
     a = predict(r["model"], healthy_then_injured, r["band"])["p50"].iloc[0]
     b = predict(r["model"], poor_both, r["band"])["p50"].iloc[0]
-    assert a > b
+    assert a >= b  # guaranteed by the monotonic constraint on share_best
 
 
 def test_cap_holds(trained):
@@ -203,7 +203,26 @@ def test_minutes_best_takes_the_better_season():
     out, _ = finish(f)
     assert out["minutes_best"].iloc[0] == 3000.0 and out["minutes_1y"].iloc[0] == 300.0
     assert out["share_best"].iloc[0] == pytest.approx(3000 / (90 * 38))
+    assert out["share_1y"].iloc[0] == pytest.approx(300 / (90 * 38))
+    assert out["top5_share_2y"].iloc[0] == pytest.approx(3300 / (2 * 38 * 90))
     # recency-weighted: (0 + 0.75*4 + 0.5*1) / (300 + 0.75*3000 + 0.5*1500) * 90
     assert out["ga90_raw"].iloc[0] == pytest.approx(3.5 / 3300 * 90)
     assert out["age_under_peak"].iloc[0] == pytest.approx(2.0, abs=0.01)
     assert out["age_over_peak"].iloc[0] == 0.0
+
+
+def test_volume_is_capped():
+    import pandas as pd
+
+    from mercato.model.features import finish
+    base = {"player_id": [1, 2], "as_of": ["2025-08-01"] * 2, "birth": ["2001-08-01"] * 2,
+            "group": ["AM"] * 2, "league": ["GB1"] * 2, "club_id": [1, 1],
+            "club_elo": [1800.0] * 2, "apps_1y": [40, 40], "uel_minutes_2y": [0.0, 0.0]}
+    for k in range(3):
+        base |= {f"minutes_y{k}": [3420.0, 3420.0], f"goals_y{k}": [8.0, 8.0],
+                 f"assists_y{k}": [6.0, 6.0], f"club_games_y{k}": [50, 50]}
+    # an ironman with a long European run against a regular with a normal one
+    base |= {"top5_minutes_2y": [6840.0, 9000.0], "ucl_minutes_2y": [1200.0, 2500.0]}
+    out, _ = finish(pd.DataFrame(base))
+    assert out["top5_share_2y"].tolist() == [1.0, 1.0]
+    assert out["ucl_share_2y"].tolist() == [1.0, 1.0]

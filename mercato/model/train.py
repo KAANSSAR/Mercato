@@ -45,7 +45,7 @@ from mercato.sources.tm_datasets import (
     read,
 )
 
-VERSION = "v1.3"
+VERSION = "v1.4"
 BAND = (0.10, 0.90)  # P10 to P90
 MIN_AGE_SUPPORT = 30  # transfers needed at or above an age to trust the model there
 # Past that age, value falls at least this much a year. The fee data alone shows only
