@@ -45,14 +45,18 @@ from mercato.sources.tm_datasets import (
     read,
 )
 
-VERSION = "v1.2"
+VERSION = "v1.3"
 BAND = (0.10, 0.90)  # P10 to P90
 MIN_AGE_SUPPORT = 30  # transfers needed at or above an age to trust the model there
+# Past that age, value falls at least this much a year. The fee data alone shows only
+# about 5% because of selection: only good older players get sold for a fee at all.
+MIN_AGE_DECLINE = 0.15
 MIN_TRAIN_FEE = 500_000
 FIRST_TRAIN_SEASON = 2015
 MODEL_DIR = Path("data/models")
-PARAMS = {"max_depth": 4, "learning_rate": 0.03, "min_child_weight": 5, "subsample": 0.8,
-          "colsample_bytree": 0.8, "reg_lambda": 1.0, "tree_method": "hist"}
+# Regularised so the few huge fees don't drag the top end (v1.2 put Morgan Rogers at €268m)
+PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 25, "subsample": 0.8,
+          "colsample_bytree": 0.8, "reg_lambda": 5.0, "gamma": 0.05, "tree_method": "hist"}
 
 
 @dataclass
@@ -138,7 +142,7 @@ def age_decline(f: pd.DataFrame) -> tuple[float, float]:
     band = (ages >= 29) & (ages < support + 1)
     by_age = f.loc[band].assign(a=ages[band].astype(int)).groupby("a")["y"].median()
     slope = np.polyfit(by_age.index, by_age.values, 1)[0] if len(by_age) >= 3 else -0.15
-    return float(support), float(min(slope, -0.05))
+    return float(support), float(min(slope, np.log(1 - MIN_AGE_DECLINE)))
 
 
 def predict(model, X: pd.DataFrame, band: tuple[float, float], ages=None,
@@ -294,6 +298,9 @@ def main():
     args = ap.parse_args()
     d = load()
     result = train(d)
+    idx = result["metrics"]["fee_index"]
+    print("fee index (median comparable move, €m):",
+          ", ".join(f"{k}: {v / 1e6:.1f}" for k, v in idx.items()))
     values = value_current(d, result)
     report(d, values)
     if not args.dry:
@@ -310,6 +317,9 @@ def report(d: Data, values: pd.DataFrame) -> None:
     print("\nMost undervalued by Transfermarkt (regulars, TM value €5m+):")
     print(regulars.sort_values("gap", ascending=False)[cols].head(15).to_string(
         index=False, formatters=fmt))
+    print("\nHighest valuations:")
+    top = values.assign(name=values["player_id"].map(names)).sort_values("p50", ascending=False)
+    print(top[cols].head(10).to_string(index=False, formatters=fmt))
     print("\nMost overvalued:")
     print(regulars.sort_values("gap")[cols].head(10).to_string(index=False, formatters=fmt))
 
