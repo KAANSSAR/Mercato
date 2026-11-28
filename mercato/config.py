@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # Seconds between API calls. Free plan: 10 a minute, so 6.1. Pro allows far more,
     # so set API_MIN_INTERVAL=0.25 in .env for the backfill month.
     api_min_interval: float = 6.1
+    # Supabase Storage, for player photos and crests (Settings > API in Supabase). Without
+    # these the media job stores the source image links instead of copies.
+    supabase_url: str = ""
+    supabase_service_key: str = ""
 
 
 settings = Settings()

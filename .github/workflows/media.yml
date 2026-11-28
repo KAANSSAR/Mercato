@@ -1,0 +1,21 @@
+name: media
+
+# Weekly: photos for new players, crests for new clubs, flags and colours.
+# Image calls are free (not counted against the API-Football quota).
+on:
+  schedule:
+    - cron: "23 4 * * 3"  # Wednesdays 04:23 UTC
+  workflow_dispatch:
+
+jobs:
+  media:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run python -m mercato.jobs.media
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
