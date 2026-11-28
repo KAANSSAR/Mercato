@@ -3,8 +3,9 @@
     uv run python -m mercato.sources.gfr --dry   # scrape, match, compare, print only
     uv run python -m mercato.sources.gfr         # also write a snapshot to Postgres
 
-Reads the two public ranking pages as a visitor sees them (rendered in headless Chromium,
-two page loads a run, once a day), identifying itself. Their robots.txt allows all
+Reads three public pages as a visitor sees them (men's league and club rankings, and the
+FIFA world ranking GFR republishes; headless Chromium, three page loads a run, once a day),
+identifying itself. Their robots.txt allows all
 crawlers. Ratings are 0 to 100 (50 is the world average). Credit GFR wherever they appear.
 
 They only publish current ratings, so history (every match date since 2015) still comes
@@ -24,10 +25,11 @@ import pandas as pd
 from mercato.mapping.names import club_key, club_similarity
 
 BASE = "https://globalfootballrankings.com/rankings"
-PAGES = {"leagues": f"{BASE}/leagues/men", "clubs": f"{BASE}/teams/men"}
+PAGES = {"leagues": f"{BASE}/leagues/men", "clubs": f"{BASE}/teams/men",
+         "fifa": f"{BASE}/fifa-world-ranking/men"}
 USER_AGENT = ("Mozilla/5.0 (compatible; MercatoBot/1.0; "
               "+https://mercato.kanishka-sarkar.com)")
-MIN_ROWS = {"leagues": 50, "clubs": 500}
+MIN_ROWS = {"leagues": 50, "clubs": 500, "fifa": 150}
 CLUB_MATCH = 85
 CLUB_CLEAR = (75, 20)  # or at least 75 and 20 clear of the next club in that country
 OVERRIDES = Path("db/overrides/gfr_clubs.csv")  # country, slug, tm_club_id
@@ -54,12 +56,22 @@ EXTRACT = r"""
   });
 }
 """
+# FIFA world ranking table: rank, team, points (and movement), confederation from the logo
+EXTRACT_FIFA = r"""
+() => [...document.querySelectorAll('main tr')].map(r => {
+  const c = [...r.querySelectorAll('td')].map(x => x.innerText.trim());
+  const logo = [...r.querySelectorAll('img')].map(i => i.alt).find(a => / logo$/.test(a));
+  return c.length >= 3 ? {rank: c[0], team: c[1], points: c[2], conf: logo || null} : null;
+}).filter(Boolean)
+"""
+RELEASED = re.compile(r"Released ([A-Z][a-z]{2} \d{1,2}, \d{4})")
 ROW = re.compile(r"^(\d+) (.+) (\d+(?:\.\d+)?)$")
 UPDATED = re.compile(r"Updated ([A-Z][a-z]{2} \d{1,2}, \d{4})")
 
 
 def scrape(timeout_ms: int = 60_000) -> dict:
-    """Render both pages; returns {"leagues": [...], "clubs": [...], "updated": date}."""
+    """Render the three pages; returns {"leagues": [...], "clubs": [...], "fifa": [...],
+    "updated": date, "fifa_released": date}."""
     from playwright.sync_api import sync_playwright
 
     out = {}
@@ -69,6 +81,14 @@ def scrape(timeout_ms: int = 60_000) -> dict:
         for kind, url in PAGES.items():
             # not "networkidle": their ads and analytics never go quiet
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if kind == "fifa":
+                page.wait_for_function(f"document.querySelectorAll('main tr').length"
+                                       f" >= {MIN_ROWS[kind]}", timeout=timeout_ms)
+                out["fifa"] = page.evaluate(EXTRACT_FIFA)
+                m = RELEASED.search(page.inner_text("main"))
+                out["fifa_released"] = (datetime.strptime(m.group(1), "%b %d, %Y").date()
+                                        if m else date.today())
+                continue
             path = "leagues" if kind == "leagues" else "teams"
             page.wait_for_function(
                 f"document.querySelectorAll('main a[href*=\"/rankings/{path}/men/\"]').length"
@@ -83,6 +103,21 @@ def scrape(timeout_ms: int = 60_000) -> dict:
 def parse_updated(text: str) -> date:
     m = UPDATED.search(text or "")
     return datetime.strptime(m.group(1), "%b %d, %Y").date() if m else date.today()
+
+
+def parse_fifa(raw: list[dict]) -> pd.DataFrame:
+    """FIFA ranking rows into rank, team, points and confederation."""
+    rows = []
+    for r in raw:
+        rank = re.sub(r"\D", "", r.get("rank") or "")
+        pts = re.match(r"[\d,]+(?:\.\d+)?", (r.get("points") or "").replace(",", ""))
+        if not rank or not pts or not r.get("team"):
+            continue
+        conf = (r.get("conf") or "").removesuffix(" logo") or None
+        rows.append({"rank": int(rank), "team": r["team"], "points": float(pts.group(0)),
+                     "confederation": conf})
+    df = pd.DataFrame(rows, columns=["rank", "team", "points", "confederation"])
+    return df.drop_duplicates("team").sort_values("rank").reset_index(drop=True)
 
 
 def parse_rows(raw: list[dict]) -> pd.DataFrame:
@@ -186,7 +221,8 @@ def compare(leagues: pd.DataFrame, clubs: pd.DataFrame, data_dir=None) -> None:
         print(m.sort_values("gap")[cols].head(8).to_string(index=False))
 
 
-def save(updated: date, leagues: pd.DataFrame, clubs: pd.DataFrame) -> dict:
+def save(updated: date, leagues: pd.DataFrame, clubs: pd.DataFrame,
+         fifa: pd.DataFrame | None = None, fifa_released: date | None = None) -> dict:
     from mercato.db import connect, job_run, upsert
 
     def recs(df, extra):
@@ -194,13 +230,19 @@ def save(updated: date, leagues: pd.DataFrame, clubs: pd.DataFrame) -> dict:
         return out.where(pd.notna(out), None)[["snapshot", "country", "slug", "name", "rank",
                                                "rating", extra]].to_dict("records")
     with connect() as conn, job_run(conn, "gfr") as stats:
-        stats["requests"] = 2
+        stats["requests"] = 3
         n = upsert(conn, "gfr_league_ratings", recs(leagues, "tm_competition_id"),
                    ["snapshot", "country", "slug"],
                    update=["name", "rank", "rating", "tm_competition_id"])
         n += upsert(conn, "gfr_club_ratings", recs(clubs, "tm_club_id"),
                     ["snapshot", "country", "slug"],
                     update=["name", "rank", "rating", "tm_club_id"])
+        if fifa is not None and len(fifa):
+            f = fifa.assign(release=fifa_released).astype(object)
+            n += upsert(conn, "fifa_ranking",
+                        f.where(pd.notna(f), None)[["release", "team", "rank", "points",
+                                                    "confederation"]].to_dict("records"),
+                        ["release", "team"], update=["rank", "points", "confederation"])
         stats["rows_written"] = n
         return dict(stats)
 
@@ -212,7 +254,8 @@ def main():
     raw = scrape()
     leagues = map_leagues(parse_rows(raw["leagues"]))
     clubs = parse_rows(raw["clubs"])
-    for kind, df in (("leagues", leagues), ("clubs", clubs)):
+    fifa = parse_fifa(raw["fifa"])
+    for kind, df in (("leagues", leagues), ("clubs", clubs), ("fifa", fifa)):
         if len(df) < MIN_ROWS[kind]:  # the page changed: fail loudly, write nothing
             raise RuntimeError(f"only {len(df)} {kind} parsed; the page layout may have changed")
     try:
@@ -238,9 +281,12 @@ def main():
     GFR_DIR.mkdir(parents=True, exist_ok=True)
     leagues.assign(snapshot=raw["updated"]).to_csv(GFR_DIR / "leagues.csv", index=False)
     clubs.assign(snapshot=raw["updated"]).to_csv(GFR_DIR / "clubs.csv", index=False)
+    fifa.assign(release=raw["fifa_released"]).to_csv(GFR_DIR / "fifa.csv", index=False)
+    print(f"\nFIFA ranking released {raw['fifa_released']}: {len(fifa)} national teams")
+    print(fifa.head(10).to_string(index=False))
     compare(leagues, clubs)
     if not args.dry:
-        print(save(raw["updated"], leagues, clubs))
+        print(save(raw["updated"], leagues, clubs, fifa, raw["fifa_released"]))
 
 
 if __name__ == "__main__":

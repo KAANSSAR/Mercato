@@ -87,3 +87,15 @@ def test_ambiguous_names_need_an_override():
     o = pd.read_csv("db/overrides/gfr_clubs.csv")
     c = map_clubs(parse_rows(CLUB_ROWS), tm, o).set_index("slug")["tm_club_id"]
     assert c["sporting-cp"] == 336
+
+
+def test_parse_fifa():
+    from mercato.sources.gfr import parse_fifa
+    raw = [{"rank": "1", "team": "Spain", "points": "2004\n-", "conf": "UEFA logo"},
+           {"rank": "7", "team": "Morocco", "points": "1791\n-18", "conf": "CAF logo"},
+           {"rank": "211", "team": "San Marino", "points": "713\n-", "conf": None},
+           {"rank": "", "team": "header", "points": "", "conf": None}]
+    f = parse_fifa(raw)
+    assert list(f["team"]) == ["Spain", "Morocco", "San Marino"]
+    assert f.loc[1, "points"] == 1791.0 and f.loc[1, "confederation"] == "CAF"
+    assert pd.isna(f.loc[2, "confederation"])
