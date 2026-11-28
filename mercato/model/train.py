@@ -76,6 +76,7 @@ class Data:
     transfers: pd.DataFrame
     apps: pd.DataFrame
     team_elo: pd.DataFrame
+    valuations: pd.DataFrame | None = None  # Transfermarkt value history, for the backtest
     _prepared: tuple | None = None
 
     _money: pd.DataFrame | None = None
@@ -95,9 +96,13 @@ class Data:
 
 def load(data_dir: Path = DATA_DIR) -> Data:
     games = read("games", data_dir)
+    try:
+        valuations = read("player_valuations", data_dir)
+    except FileNotFoundError:
+        valuations = None
     return Data(players=read("players", data_dir), clubs=read("clubs", data_dir),
                 transfers=read("transfers", data_dir), apps=read("appearances", data_dir),
-                team_elo=run_elo(games))
+                team_elo=run_elo(games), valuations=valuations)
 
 
 def _player_info(d: Data) -> pd.DataFrame:

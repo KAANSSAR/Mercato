@@ -30,6 +30,7 @@ def main(dry: bool = False) -> dict:
 
     from mercato.db import connect, job_run, upsert
 
+    rated = rated.drop(columns=["goals_for", "goals_against"])  # in games already
     rows = rated.astype(object).where(pd.notna(rated), None).to_dict("records")
     with connect() as conn, job_run(conn, "elo") as stats:
         stats["rows_written"] = upsert(conn, "team_elo", rows, ["game_id", "tm_club_id"],

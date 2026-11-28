@@ -104,10 +104,12 @@ def run(games: pd.DataFrame, p: EloParams = EloParams()) -> pd.DataFrame:
                 "competition_id": r.competition_id}
         out.append(base | {"tm_club_id": r.home_club_id, "opponent_tm_club_id": r.away_club_id,
                            "is_home": True, "elo_pre": h, "opp_elo_pre": a,
-                           "elo_post": h + delta, "expected": e, "result": s})
+                           "elo_post": h + delta, "expected": e, "result": s,
+                           "goals_for": r.home_club_goals, "goals_against": r.away_club_goals})
         out.append(base | {"tm_club_id": r.away_club_id, "opponent_tm_club_id": r.home_club_id,
                            "is_home": False, "elo_pre": a, "opp_elo_pre": h,
-                           "elo_post": a - delta, "expected": 1 - e, "result": 1 - s})
+                           "elo_post": a - delta, "expected": 1 - e, "result": 1 - s,
+                           "goals_for": r.away_club_goals, "goals_against": r.home_club_goals})
     return pd.DataFrame(out)
 
 
