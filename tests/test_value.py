@@ -68,10 +68,27 @@ def test_scale_never_changes_the_order(world):
     _, _, prep, r = world
     c = check(r["values"])
     assert abs(float(c["median_gap"].rstrip("%")) / 100) < 0.12
-    base = r["values"]["p50"].rank()
-    for mode in ("linear", "level"):
-        other = fit(prep, scale=mode, verbose=False)["values"]["p50"].rank()
-        assert np.corrcoef(base, other)[0, 1] > 0.999, mode
+    # line price lists: the order within each line is untouched
+    v = r["values"]
+    for mode in ("rank", "linear", "level"):
+        other = fit(prep, scale=mode, verbose=False)["values"]
+        for ln in ("ATT", "MID", "DEF", "GK"):
+            m = v["line"] == ln
+            assert np.corrcoef(v.loc[m, "p50"].rank(), other.loc[m, "p50"].rank())[0, 1] \
+                > 0.995, (mode, ln)  # ties only where the scale clamps at the ends
+
+
+def test_each_line_gets_its_own_price_list(world):
+    from mercato.model.value import check
+    _, _, _, r = world
+    for ln, x in check(r["values"])["by_line"].items():
+        assert abs(float(x["median_gap"].rstrip("%")) / 100) < 0.15, ln
+
+
+def test_age_multiplies_performance_rather_than_interacting():
+    from mercato.model.value import _constraints
+    groups = _constraints(["score", "age_under_peak", "age_over_peak", "pos_ATT", "pos_GK"])
+    assert not any("score" in g and "age_under_peak" in g for g in groups)
 
 
 def test_rank_scale_uses_the_market_price_list():

@@ -10,10 +10,12 @@ Three steps:
 2. Value curve: what a rating is worth at each age and position, learned from real fees
    (inflation adjusted). Only rating, age and position go in: no club, league, Europe or
    buyer, so two players who play the same get the same value wherever they play.
-3. Euro scale: Transfermarkt's price list for the whole market, measured on regulars.
-   Mercato ranks every player; the player Mercato ranks 50th gets what the 50th most
-   valuable regular on Transfermarkt is worth, whoever that is. The order is entirely
-   Mercato's. No player's own Transfermarkt value is ever an input to his Mercato value.
+3. Euro scale: Transfermarkt's price list for each line (attack, midfield, defence,
+   keepers), measured on regulars. Mercato ranks every player in his line; the defender
+   Mercato ranks 20th gets what the 20th most valuable regular defender on Transfermarkt
+   is worth, whoever that is. The order is entirely Mercato's. No player's own
+   Transfermarkt value is ever an input to his Mercato value. (One list for everyone left
+   keepers 26% under, since the fee curve and the market price keepers differently.)
    (v2.0 matched only the level and spread, two numbers. Fees exist only for players
    someone paid for, so the fee curve has a floor of a few million and bench players came
    out at 15x Transfermarkt; a straight line can't fix a bent curve.)
@@ -31,7 +33,7 @@ import pandas as pd
 import xgboost as xgb
 from scipy.stats import norm, spearmanr
 
-from mercato.model.features import GROUP_LINE, GROUPS, finish, raw_features
+from mercato.model.features import GROUP_LINE, finish, raw_features
 from mercato.model.fee_index import build_index, deflate
 from mercato.model.rating import COMPONENTS, game_features, rate, team_games
 from mercato.model.train import (
@@ -48,7 +50,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.1"
+VERSION = "v2.2"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -57,7 +59,8 @@ REGULAR_MINUTES = 1500  # best season, for the scale and the checks
 MIN_TM = 1_000_000
 LOW_MINUTES = 900       # fewer than this in his best season: rating too thin to trust
 SCALE_Q = (0.10, 0.90)  # linear scale: spread measured between these quantiles
-SCALES = ("rank", "linear", "level")
+SCALES = ("rank_line", "rank", "linear", "level")
+LINE_NAMES = ("ATT", "MID", "DEF", "GK")
 
 
 # ---------- features ----------
@@ -77,18 +80,32 @@ def base_features(d: Data, rows: pd.DataFrame, gm: dict | None = None):
 
 
 def design(f: pd.DataFrame) -> pd.DataFrame:
+    """Rating score, age and line. Lines, not the eight groups: a handful of giant
+    historical fees for attacking midfielders made every good one look like Wirtz."""
     X = f[["score", "age_under_peak", "age_over_peak"]].astype(float).copy()
-    for g in GROUPS:
-        X[f"pos_{g}"] = (f["group"] == g).astype(float)
+    line = f["group"].map(GROUP_LINE)
+    for ln in LINE_NAMES:
+        X[f"pos_{ln}"] = (line == ln).astype(float)
     return X
 
 
-def _curve(X, y, X_val=None, y_val=None, rounds=None) -> tuple[xgb.XGBRegressor, int]:
+def _constraints(columns) -> list[list[str]]:
+    """Performance and age each work with position but not with each other, so age is a
+    multiplier on what a player's performance is worth. Freely interacting, the fee data
+    taught v2.1 that a young player with a high rating is worth Wirtz money (Hinshelwood
+    €156m)."""
+    pos = [c for c in columns if c.startswith("pos_")]
+    return [["score", *pos], ["age_under_peak", "age_over_peak", *pos]]
+
+
+def _curve(X, y, X_val=None, y_val=None, rounds=None,
+           additive: bool = True) -> tuple[xgb.XGBRegressor, int]:
+    extra = {"interaction_constraints": _constraints(list(X.columns))} if additive else {}
     m = xgb.XGBRegressor(objective="reg:quantileerror", quantile_alpha=0.5,
                          n_estimators=rounds or 3000,
                          monotone_constraints=tuple(MONOTONE.get(c, 0) for c in X.columns),
                          early_stopping_rounds=100 if X_val is not None else None,
-                         **CURVE_PARAMS)
+                         **CURVE_PARAMS, **extra)
     if X_val is not None:
         m.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
         return m, int(m.best_iteration) + 1
@@ -115,8 +132,8 @@ def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int =
             "cutoff": cutoff}
 
 
-def fit(prep: dict, weights: dict | None = None, scale: str = "rank",
-        verbose: bool = True) -> dict:
+def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
+        additive: bool = True, verbose: bool = True) -> dict:
     assert scale in SCALES, scale
     pool, ref = rate(prep["pool"], None, weights)
     moves, _ = rate(prep["moves"], ref)
@@ -124,13 +141,13 @@ def fit(prep: dict, weights: dict | None = None, scale: str = "rank",
     tr, va, te = (moves["season"] <= ts - 2), (moves["season"] == ts - 1), (moves["season"] == ts)
     X, y = design(moves), moves["y"].to_numpy()
 
-    m_tr, best = _curve(X[tr], y[tr], X[va], y[va])
+    m_tr, best = _curve(X[tr], y[tr], X[va], y[va], additive=additive)
     band = residual_band(y[va], m_tr.predict(X[va]))
-    m_eval, _ = _curve(X[tr | va], y[tr | va], rounds=best)
+    m_eval, _ = _curve(X[tr | va], y[tr | va], rounds=best, additive=additive)
     rule = age_decline(moves[tr | va])
     log_te = m_eval.predict(X[te]) + rule[1] * np.clip(moves.loc[te, "age"] - rule[0], 0, None)
     actual = moves.loc[te, "fee_adj"].to_numpy()
-    model, _ = _curve(X, y, rounds=best)
+    model, _ = _curve(X, y, rounds=best, additive=additive)
     rule = age_decline(moves)
 
     result = {"model": model, "ref": ref, "band": band, "age_rule": rule, "scale_mode": scale,
@@ -164,13 +181,23 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
               "score"] + [f"z_{c}" for c in COMPONENTS]].copy()
     v["line"] = v["group"].map(GROUP_LINE)
     reg = regulars(v).to_numpy()
-    lt, lr = np.log(v.loc[reg, "tm_value"].to_numpy(float)), log_raw[reg]
-    to_eur = euro_scale(lr, lt, result["scale_mode"])
+    mode = result["scale_mode"]
     lo, hi = result["band"]
-    v["p10"], v["p50"], v["p90"] = (np.exp(to_eur(log_raw + lo)), np.exp(to_eur(log_raw)),
-                                    np.exp(to_eur(log_raw + hi)))
-    # local slope of the scale at each player, so the drivers are in euros
-    slope = (to_eur(log_raw + 0.05) - to_eur(log_raw - 0.05)) / 0.1
+    logs = np.zeros((len(v), 3))
+    slope = np.ones(len(v))
+    parts = ([(v["line"] == ln).to_numpy() for ln in LINE_NAMES] if mode == "rank_line"
+             else [np.ones(len(v), dtype=bool)])
+    for m in parts:
+        r = reg & m
+        if r.sum() < 20:  # too few regulars in this line: use the whole market
+            r = reg
+        to_eur = euro_scale(log_raw[r], np.log(v.loc[r, "tm_value"].to_numpy(float)),
+                            "rank" if mode == "rank_line" else mode)
+        x = log_raw[m]
+        logs[m] = np.column_stack([to_eur(x + lo), to_eur(x), to_eur(x + hi)])
+        # local slope of the scale at each player, so the drivers are in euros
+        slope[m] = (to_eur(x + 0.05) - to_eur(x - 0.05)) / 0.1
+    v["p10"], v["p50"], v["p90"] = np.exp(logs[:, 0]), np.exp(logs[:, 1]), np.exp(logs[:, 2])
     cap = result["cap"]
     v["capped"] = v["p50"] > cap
     v[["p10", "p50", "p90"]] = v[["p10", "p50", "p90"]].clip(upper=cap)
@@ -272,7 +299,8 @@ def backtest_rows(d: Data, horizon_days: int = 365):
     return rows, later, t0
 
 
-def backtest(d: Data, weights: dict | None = None, scale: str = "rank",
+def backtest(d: Data, weights: dict | None = None, scale: str = "rank_line",
+             additive: bool = True,
              horizon_days: int = 365, min_test_moves: int = 200,
              names: dict | None = None) -> dict:
     """Value everyone as of a year ago with only what was known then (fees before then,
@@ -281,7 +309,7 @@ def backtest(d: Data, weights: dict | None = None, scale: str = "rank",
     players rise anyway and that isn't skill."""
     rows, later, t0 = backtest_rows(d, horizon_days)
     prep = prepare(d, rows, t0, min_test_moves)
-    v = fit(prep, weights, scale, verbose=False)["values"]
+    v = fit(prep, weights, scale, additive, verbose=False)["values"]
     v["tm_later"] = v["player_id"].map(later)
     v = v[regulars(v) & ~v["low_confidence"] & (v["tm_later"] > 0)].copy()
     v["gap0"] = np.log(v["p50"] / v["tm_value"])
