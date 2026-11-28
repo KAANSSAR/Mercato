@@ -228,11 +228,11 @@ def _window_sums(money: pd.DataFrame, club_col: str, clubs, dates, years: int = 
 
 
 def market_features(f: pd.DataFrame, money: pd.DataFrame, elo: pd.DataFrame,
-                    typical_buyer: dict | None = None) -> tuple[pd.DataFrame, dict]:
+                    buyer_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     """Seller: how much and how often the player's club has sold in the last three years
     (Benfica and Brighton sell constantly; Real Madrid almost never).
     Buyer: what the buying club spent in the last three years and its Elo. At valuation
-    time there is no buyer, so a typical top-5 buyer from the latest season stands in."""
+    time there is no buyer, so a plausible one stands in: see plausible_buyer."""
     dates = pd.to_datetime(f["as_of"]).astype("datetime64[ns]").to_numpy()
     sold, n_sold = _window_sums(money, "from_club_id", f["club_id"].to_numpy(), dates)
     f["seller_sales_3y"] = np.log1p(sold / 1e6)
@@ -248,16 +248,47 @@ def market_features(f: pd.DataFrame, money: pd.DataFrame, elo: pd.DataFrame,
         be = pd.merge_asof(left.sort_values("as_of"), right.sort_values("as_of"),
                            on="as_of", by="club_id", direction="backward")
         f["buyer_elo"] = be.sort_values("_i")["elo_post"].to_numpy()
-    if typical_buyer is None:
-        latest = f["year"].max()
-        recent = f[f["year"] == latest]
-        typical_buyer = {"buyer_spend_3y": float(recent["buyer_spend_3y"].median()),
-                         "buyer_elo": float(recent["buyer_elo"].median())}
-    if "buyer_id" not in f or f["buyer_id"].isna().all():
-        f["buyer_spend_3y"] = typical_buyer["buyer_spend_3y"]
-        f["buyer_elo"] = typical_buyer["buyer_elo"]
+        f["elo_gap"] = f["buyer_elo"] - f["club_elo"]
+    elif buyer_ref is not None:
+        f = apply_buyer_scenario(f, buyer_ref)
+    return f
+
+
+def buyer_reference(f: pd.DataFrame) -> pd.DataFrame:
+    """Real moves: the selling club's Elo and the buyer it sold to."""
+    return f[["club_elo", "buyer_spend_3y", "buyer_elo"]].dropna().reset_index(drop=True)
+
+
+def plausible_buyer(club_elo, ref: pd.DataFrame, window: float = 75.0,
+                    min_moves: int = 20) -> tuple[np.ndarray, np.ndarray]:
+    """The kind of club that buys from clubs like yours: the median buyer in real moves
+    from sellers within `window` Elo of the player's club, widened until there are
+    enough moves. Haaland's plausible buyer is an elite club; a Bologna player's is an
+    upper-mid Premier League side. (A single median buyer for everyone valued Haaland as
+    if Brentford were buying him from Man City.)"""
+    sel_elo = ref["club_elo"].to_numpy()
+    spend, belo = ref["buyer_spend_3y"].to_numpy(), ref["buyer_elo"].to_numpy()
+    out_s, out_e = np.empty(len(club_elo)), np.empty(len(club_elo))
+    for i, e in enumerate(np.asarray(club_elo, dtype=float)):
+        if np.isnan(e):
+            out_s[i], out_e[i] = np.median(spend), np.median(belo)
+            continue
+        w = window
+        while True:
+            m = np.abs(sel_elo - e) <= w
+            if m.sum() >= min_moves or w > 2000:
+                break
+            w *= 2
+        out_s[i], out_e[i] = np.median(spend[m]), np.median(belo[m])
+    return out_s, out_e
+
+
+def apply_buyer_scenario(f: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
+    """Replace any known buyer with the plausible one (valuations, honest scoring)."""
+    f = f.copy()
+    f["buyer_spend_3y"], f["buyer_elo"] = plausible_buyer(f["club_elo"], ref)
     f["elo_gap"] = f["buyer_elo"] - f["club_elo"]
-    return f, typical_buyer
+    return f
 
 
 MARKET = ["buyer_spend_3y", "buyer_elo", "seller_sales_3y", "seller_sales_n_3y", "elo_gap"]

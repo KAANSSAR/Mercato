@@ -48,7 +48,9 @@ def main():
         regulars = v[(v["minutes_best"] >= 1500) & (v["tm_value"] >= 5e6)]
         m = r["metrics"]
         summary[name] = {
-            "mdape": f"{m['test_mdape']:.1%}", "coverage": f"{m['test_coverage_p10_p90']:.0%}",
+            "mdape (buyer hidden)": f"{m['test_mdape']:.1%}",
+            "mdape (buyer known)": f"{m['test_mdape_known_buyer']:.1%}",
+            "coverage": f"{m['test_coverage_p10_p90']:.0%}",
             **{f"mdape {ln}": f"{v:.1%}" for ln, v in m["mdape_by_line"].items()},
             "band": f"x{m['band_multipliers'][0]} to x{m['band_multipliers'][1]}",
             "at_cap": int(v["capped"].sum()),

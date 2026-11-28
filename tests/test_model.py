@@ -266,7 +266,7 @@ def test_percentiles_are_within_position():
     assert add_percentiles(new, ref)[0]["ga90_pct"].iloc[0] == pytest.approx(2 / 3)
 
 
-def test_market_features_windows_and_typical_buyer():
+def test_market_features_windows():
     import pandas as pd
 
     from mercato.model.features import market_features, money_table
@@ -277,17 +277,36 @@ def test_market_features_windows_and_typical_buyer():
                         "elo_post": [1900.0, 1600.0]})
     f = pd.DataFrame({"as_of": ["2025-08-01"], "club_id": [1], "buyer_id": [9],
                       "club_elo": [1600.0], "year": [2025]})
-    out, typical = market_features(f.copy(), money_table(tr), elo)
+    out = market_features(f.copy(), money_table(tr), elo)
     # seller sold 20m + 10m in the three years before (the 2020 sale is too old)
     assert out["seller_sales_n_3y"].iloc[0] == 2
     assert out["seller_sales_3y"].iloc[0] == pytest.approx(np.log1p(30))
     assert out["buyer_spend_3y"].iloc[0] == pytest.approx(np.log1p(30))
     assert out["elo_gap"].iloc[0] == pytest.approx(300)
-    # a current player (no buyer) is valued against the typical buyer
-    cur = pd.DataFrame({"as_of": ["2026-06-01"], "club_id": [1], "club_elo": [1650.0],
-                        "year": [2025]})
-    out2, _ = market_features(cur, money_table(tr), elo, typical)
-    assert out2["buyer_elo"].iloc[0] == typical["buyer_elo"]
+
+
+def test_plausible_buyer_depends_on_the_seller():
+    import pandas as pd
+
+    from mercato.model.features import apply_buyer_scenario, plausible_buyer
+    # elite sellers sell to elite buyers, small sellers to mid buyers
+    ref = pd.DataFrame({"club_elo": [2000.0] * 25 + [1600.0] * 25,
+                        "buyer_spend_3y": [6.0] * 25 + [4.0] * 25,
+                        "buyer_elo": [2010.0] * 25 + [1750.0] * 25})
+    spend, belo = plausible_buyer([1990.0, 1620.0, np.nan], ref)
+    assert belo[0] == 2010.0 and belo[1] == 1750.0
+    assert spend[0] > spend[1]
+    assert not np.isnan(belo[2])  # no Elo: falls back to the overall median
+    f = pd.DataFrame({"club_elo": [1990.0], "buyer_spend_3y": [1.0], "buyer_elo": [1500.0]})
+    g = apply_buyer_scenario(f, ref)
+    assert g["buyer_elo"].iloc[0] == 2010.0 and g["elo_gap"].iloc[0] == pytest.approx(20)
+    assert f["buyer_elo"].iloc[0] == 1500.0  # original untouched
+
+
+def test_honest_metrics_hide_the_buyer(trained):
+    _, _, r = trained
+    m = r["metrics"]
+    assert "test_mdape_known_buyer" in m and 0 < m["test_mdape"] < 1
 
 
 def test_lines_follow_transfermarkt():

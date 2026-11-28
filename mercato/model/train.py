@@ -33,6 +33,8 @@ from mercato.model.features import (
     NUMERIC_EURO,
     add_percentiles,
     additive_platform,
+    apply_buyer_scenario,
+    buyer_reference,
     design_matrix,
     finish,
     latest_elo,
@@ -130,8 +132,8 @@ def features_for(rows: pd.DataFrame, d: Data, state: dict | None = None):
     state = state or {}
     f, gm = finish(raw_features(rows, *d.prepared()), state or None)
     f, pct = add_percentiles(f, state.get("_pct"))
-    f, buyer = market_features(f, d.money(), d.prepared()[2], state.get("_buyer"))
-    return f, {**gm, "_pct": pct, "_buyer": buyer}
+    f = market_features(f, d.money(), d.prepared()[2], state.get("_buyer_ref"))
+    return f, {**gm, "_pct": pct, "_buyer_ref": state.get("_buyer_ref")}
 
 
 def fit_median(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
@@ -234,10 +236,15 @@ def prepare(d: Data, min_test_moves: int = 200) -> dict:
     f_tr, gm = features_for(rows[tr], d)
     f_va, _ = features_for(rows[va], d, gm)
     f_te, _ = features_for(rows[te], d, gm)
-    # the typical buyer for valuations: the median top-5 buyer of the newest season
-    gm["_buyer"] = {"buyer_spend_3y": float(f_te["buyer_spend_3y"].median()),
-                    "buyer_elo": float(f_te["buyer_elo"].median())}
-    return {"rows": rows, "index": index, "level": level, "test_season": test_season,
+    # plausible-buyer references from the three most recent seasons available at each stage,
+    # never including the rows being scored
+    def recent(f):
+        return f[f["year"] >= f["year"].max() - 2]
+    trva = pd.concat([f_tr, f_va], ignore_index=True)
+    gm["_buyer_ref"] = buyer_reference(recent(pd.concat([trva, f_te], ignore_index=True)))
+    return {"rows": rows, "ref_val": buyer_reference(recent(f_tr)),
+            "ref_test": buyer_reference(recent(trva)), "index": index, "level": level,
+            "test_season": test_season,
             "f_tr": f_tr, "f_va": f_va, "f_te": f_te, "gm": gm}
 
 
@@ -250,26 +257,33 @@ def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = NUME
     X_tr, X_va, X_te = (design_matrix(f, numeric) for f in (f_tr, f_va, f_te))
     kw = {"params": params, "additive": additive}
 
-    # tune rounds on the validation season, and take the band from its residuals
+    # tune rounds on the validation season, and take the band from its residuals with the
+    # real buyer hidden: valuations never know the buyer, so neither does the band
     m_tr, best = fit_median(X_tr, f_tr["y"].to_numpy(), X_va, f_va["y"].to_numpy(), **kw)
-    band = residual_band(f_va["y"].to_numpy(), m_tr.predict(X_va))
+    X_va_scn = design_matrix(apply_buyer_scenario(f_va, prep["ref_val"]), numeric)
+    band = residual_band(f_va["y"].to_numpy(), m_tr.predict(X_va_scn))
     trva = pd.concat([f_tr, f_va], ignore_index=True)
     rule = age_decline(trva)
     m_eval, _ = fit_median(design_matrix(trva, numeric), trva["y"].to_numpy(), rounds=best, **kw)
     p_te = predict(m_eval, X_te, band, f_te["age"], rule)
+    X_te_scn = design_matrix(apply_buyer_scenario(f_te, prep["ref_test"]), numeric)
+    p_scn = predict(m_eval, X_te_scn, band, f_te["age"], rule)
     actual = f_te["fee_adj"].to_numpy()
     tm_ok = f_te["tm_value"].notna() & (f_te["tm_value"] > 0)
     tm_adj = deflate(f_te["tm_value"], f_te["season"], index, level)
     metrics = {
         "train": len(f_tr), "val": len(f_va), "test": len(f_te),
         "test_season": prep["test_season"], "rounds": best,
-        "test_mdape": mdape(p_te["p50"], actual),
-        "test_coverage_p10_p90": float(((actual >= p_te["p10"]) & (actual <= p_te["p90"])).mean()),
+        # headline: buyer hidden, as for every valuation on the site
+        "test_mdape": mdape(p_scn["p50"], actual),
+        "test_coverage_p10_p90": float(((actual >= p_scn["p10"]) & (actual <= p_scn["p90"])).mean()),
+        # for reference: how well the fee is explained once the buyer is known
+        "test_mdape_known_buyer": mdape(p_te["p50"], actual),
         "band_multipliers": [round(float(np.exp(b)), 2) for b in band],
         "age_support": rule[0], "age_decline_per_year": round(float(np.exp(rule[1]) - 1), 3),
         "tm_value_mdape_same_moves": mdape(tm_adj[tm_ok], f_te.loc[tm_ok, "fee_adj"]),
         "naive_median_mdape": mdape(np.full(len(actual), np.median(f_tr["fee_adj"])), actual),
-        "mdape_by_line": {ln: round(mdape(p_te.loc[m, "p50"], actual[m.to_numpy()]), 3)
+        "mdape_by_line": {ln: round(mdape(p_scn.loc[m, "p50"], actual[m.to_numpy()]), 3)
                           for ln in ("ATT", "MID", "DEF", "GK")
                           if (m := f_te["line"] == ln).sum() >= 10},
         "fee_index": {int(k): round(float(v)) for k, v in index.items()},
@@ -332,7 +346,8 @@ def save(result: dict, values: pd.DataFrame) -> dict:
     out = MODEL_DIR / VERSION
     out.mkdir(parents=True, exist_ok=True)
     result["model"].save_model(out / "p50.json")
-    gm = {k: v for k, v in result["group_means"].items() if k != "_pct"}
+    gm = {k: v for k, v in result["group_means"].items() if k not in ("_pct", "_buyer_ref")}
+    gm["_buyer_ref"] = result["group_means"]["_buyer_ref"].to_dict("list")
     gm["_pct"] = {src: {g: list(map(float, arr)) for g, arr in by.items()}
                   for src, by in result["group_means"]["_pct"].items()}
     (out / "meta.json").write_text(json.dumps(
