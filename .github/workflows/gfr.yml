@@ -1,0 +1,20 @@
+name: gfr
+
+# Weekly snapshot of Global Football Rankings' league and club ratings.
+# Two page loads a week. Fails (and GitHub emails you) if the page layout changes.
+on:
+  schedule:
+    - cron: "41 3 * * 2"  # Tuesdays 03:41 UTC, after the weekend's results are in
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --extra scrape
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run python -m mercato.sources.gfr
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
