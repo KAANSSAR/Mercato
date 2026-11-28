@@ -47,7 +47,8 @@ def test_rating_is_within_position_and_tracks_quality(world):
     v = r["values"]
     assert v["rating"].between(0, 100).all()
     for g in ("ST", "W", "CB"):
-        assert v.loc[v["group"] == g, "rating"].median() == pytest.approx(50, abs=8)
+        reg = v[(v["group"] == g) & (v["minutes_best"] >= 900)]
+        assert reg["rating"].median() == pytest.approx(50, abs=8)
     q = truth.loc[v["player_id"], "q"].to_numpy()
     for g in ("ST", "W"):
         m = (v["group"] == g).to_numpy()
@@ -62,16 +63,26 @@ def test_value_uses_only_rating_age_and_position(world):
     assert all(c.startswith("pos_") for c in cols[3:])
 
 
-def test_scale_matches_the_market_level_only(world):
+def test_scale_never_changes_the_order(world):
     from mercato.model.value import check, fit
     _, _, prep, r = world
     c = check(r["values"])
     assert abs(float(c["median_gap"].rstrip("%")) / 100) < 0.12
-    flat = fit(prep, spread=False, verbose=False)
-    assert flat["scale"][1] == 1.0
-    # a single shift: the order of players is untouched by the scale
-    a, b = r["values"]["p50"].rank(), flat["values"]["p50"].rank()
-    assert np.corrcoef(a, b)[0, 1] > 0.999
+    base = r["values"]["p50"].rank()
+    for mode in ("linear", "level"):
+        other = fit(prep, scale=mode, verbose=False)["values"]["p50"].rank()
+        assert np.corrcoef(base, other)[0, 1] > 0.999, mode
+
+
+def test_rank_scale_uses_the_market_price_list():
+    from mercato.model.value import euro_scale
+    rng = np.random.default_rng(0)
+    raw = rng.normal(16, 0.3, 500)              # a compressed curve with a floor
+    tm = rng.normal(16, 1.2, 500)               # the market's wider price list
+    f = euro_scale(raw, tm, "rank")
+    assert f(np.quantile(raw, 0.9)) == pytest.approx(np.quantile(tm, 0.9), abs=0.02)
+    assert f(np.quantile(raw, 0.1)) == pytest.approx(np.quantile(tm, 0.1), abs=0.02)
+    assert np.all(np.diff(f(np.sort(raw))) >= 0)
 
 
 def test_bands_and_flags(world):
@@ -107,3 +118,17 @@ def test_backtest_uses_only_the_past():
     assert len(out["move_by_gap_quintile"]) == 5
     assert -1 <= out["rank_corr_gap_vs_move"] <= 1
     assert len(out["most_undervalued_then"]) > 0
+
+
+def test_rating_separates_the_top():
+    """v2.0 put every good player at 97 to 100. Far above typical must beat a bit above."""
+    from mercato.model.rating import rate
+    n = 200
+    rng = np.random.default_rng(1)
+    f = pd.DataFrame({"group": "ST", "g90": rng.normal(0.3, 0.1, n), "a90": 0.1,
+                      "share_best": 0.8, "share_1y": 0.8, "minutes_best": 2000,
+                      "impact": 0.0, "defence": 0.0, "opposition": 1600.0,
+                      "team_level": 1600.0})
+    f.loc[0, "g90"], f.loc[1, "g90"] = 1.0, 0.6  # Haaland-like, and merely very good
+    out, _ = rate(f)
+    assert out.loc[0, "score"] > out.loc[1, "score"] + 0.15

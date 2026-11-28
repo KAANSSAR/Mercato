@@ -14,9 +14,12 @@ On-pitch evidence only, over the last three years weighted 1, 0.75, 0.5 towards 
   is the best evidence we have for defenders and keepers. It counts only through minutes
   he actually played, never as a platform premium for the club he's at.
 
-Each component is ranked against his own position (strikers against strikers), turned
-into a normal score so no single stat can run away with it, and combined with weights
-per line. The combined score is ranked again within his position for the 0 to 100 rating.
+Each component is measured against regulars in his own position (strikers against
+strikers): how many typical spreads above or below the typical regular, capped at four so
+no single stat can run away with it. v2.0 used percentiles against everyone at a top-5
+club, bench included, so every good player sat at 97 to 100 and the top couldn't be told
+apart. Components are combined with weights per line; the combined score is ranked
+against regulars in his position for the 0 to 100 rating shown on the site.
 
 Fixed, published weights rather than fitted ones, so the rating means the same thing on
 every page and can't quietly learn the market's habits.
@@ -26,7 +29,6 @@ import itertools
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
 
 from mercato.features.elo import EloParams
 from mercato.model.features import GROUP_LINE, GROUPS, RECENCY, YEARS
@@ -47,7 +49,8 @@ OUTPUT_MIX = {"ATT": (1.0, 0.75), "MID": (1.0, 1.0), "DEF": (1.0, 1.0), "GK": (0
 K_GAMES = 15.0  # shrinkage for impact and defence, in full games
 K_LEVEL = 5.0   # shrinkage for opposition and team level, in full games
 ELO_PRIOR = 1500.0
-CLIP = 0.005    # percentiles clipped before the normal score
+Z_CAP = 4.0     # a component can lift a player at most four spreads above typical
+REF_MINUTES = 900  # the yardstick is regulars: players with this many minutes in a season
 
 
 def team_games(team_elo: pd.DataFrame, hfa: float = EloParams().hfa,
@@ -127,15 +130,26 @@ def _pct(ref: np.ndarray, x: np.ndarray) -> np.ndarray:
     return (lo + hi) / 2 / len(ref)
 
 
+def _centre_scale(x: np.ndarray) -> tuple[float, float]:
+    """Robust centre and spread (median and MAD), so a few outliers don't set the yardstick."""
+    if not len(x):
+        return 0.0, 1.0
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med))) * 1.4826
+    if mad <= 0:
+        mad = float(np.std(x)) or 1.0
+    return med, mad
+
+
 def _scores(f: pd.DataFrame, comp_ref: dict, weights: dict) -> pd.DataFrame:
     z = pd.DataFrame(index=f.index)
     for c in COMPONENTS:
         vals = np.zeros(len(f))
         for grp in GROUPS:
             m = (f["group"] == grp).to_numpy()
-            if m.any():
-                p = _pct(comp_ref[c].get(grp, np.array([])), f.loc[m, c].to_numpy(float))
-                vals[m] = norm.ppf(np.clip(p, CLIP, 1 - CLIP))
+            if m.any() and grp in comp_ref[c]:
+                med, mad = comp_ref[c][grp]
+                vals[m] = np.clip((f.loc[m, c].to_numpy(float) - med) / mad, -Z_CAP, Z_CAP)
         z[f"z_{c}"] = vals
     line = f["group"].map(GROUP_LINE)
     score = np.zeros(len(f))
@@ -153,10 +167,13 @@ def rate(f: pd.DataFrame, ref: dict | None = None,
     weights = weights or WEIGHTS
     f = components(f)
     if ref is None:
-        comp_ref = {c: {g: np.sort(f.loc[f["group"] == g, c].to_numpy(float)) for g in GROUPS}
-                    for c in COMPONENTS}
-        z = _scores(f, comp_ref, weights)
-        score_ref = {g: np.sort(z.loc[(f["group"] == g).to_numpy(), "score"].to_numpy())
+        pool = f[f["minutes_best"] >= REF_MINUTES]
+        if len(pool) < 50:
+            pool = f
+        comp_ref = {c: {g: _centre_scale(pool.loc[pool["group"] == g, c].to_numpy(float))
+                        for g in GROUPS if (pool["group"] == g).any()} for c in COMPONENTS}
+        z = _scores(pool, comp_ref, weights)
+        score_ref = {g: np.sort(z.loc[(pool["group"] == g).to_numpy(), "score"].to_numpy())
                      for g in GROUPS}
         ref = {"components": comp_ref, "score": score_ref, "weights": weights}
     z = _scores(f, ref["components"], ref["weights"])

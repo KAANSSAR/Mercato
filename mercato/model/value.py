@@ -10,10 +10,13 @@ Three steps:
 2. Value curve: what a rating is worth at each age and position, learned from real fees
    (inflation adjusted). Only rating, age and position go in: no club, league, Europe or
    buyer, so two players who play the same get the same value wherever they play.
-3. Euro scale: Transfermarkt sets two numbers for the whole market, measured on regulars:
-   the typical value (level) and how far apart the top and bottom sit (spread). Like a
-   currency conversion: the order of players and the gaps between them stay Mercato's
-   own. No player's own Transfermarkt value is ever an input to his Mercato value.
+3. Euro scale: Transfermarkt's price list for the whole market, measured on regulars.
+   Mercato ranks every player; the player Mercato ranks 50th gets what the 50th most
+   valuable regular on Transfermarkt is worth, whoever that is. The order is entirely
+   Mercato's. No player's own Transfermarkt value is ever an input to his Mercato value.
+   (v2.0 matched only the level and spread, two numbers. Fees exist only for players
+   someone paid for, so the fee curve has a floor of a few million and bench players came
+   out at 15x Transfermarkt; a straight line can't fix a bent curve.)
 
 Checks: rank agreement with Transfermarkt, the typical gap (near zero by construction),
 the share of regulars more than 50% away, and the backtest: when Mercato rated a player
@@ -45,7 +48,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.0"
+VERSION = "v2.1"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -53,7 +56,8 @@ MONOTONE = {"score": 1, "age_over_peak": -1}
 REGULAR_MINUTES = 1500  # best season, for the scale and the checks
 MIN_TM = 1_000_000
 LOW_MINUTES = 900       # fewer than this in his best season: rating too thin to trust
-SCALE_Q = (0.10, 0.90)  # spread measured between these quantiles
+SCALE_Q = (0.10, 0.90)  # linear scale: spread measured between these quantiles
+SCALES = ("rank", "linear", "level")
 
 
 # ---------- features ----------
@@ -111,8 +115,9 @@ def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int =
             "cutoff": cutoff}
 
 
-def fit(prep: dict, weights: dict | None = None, spread: bool = True,
+def fit(prep: dict, weights: dict | None = None, scale: str = "rank",
         verbose: bool = True) -> dict:
+    assert scale in SCALES, scale
     pool, ref = rate(prep["pool"], None, weights)
     moves, _ = rate(prep["moves"], ref)
     ts = prep["test_season"]
@@ -128,7 +133,7 @@ def fit(prep: dict, weights: dict | None = None, spread: bool = True,
     model, _ = _curve(X, y, rounds=best)
     rule = age_decline(moves)
 
-    result = {"model": model, "ref": ref, "band": band, "age_rule": rule, "spread": spread,
+    result = {"model": model, "ref": ref, "band": band, "age_rule": rule, "scale_mode": scale,
               "cap": float(moves["fee_adj"].max()), "weights": ref["weights"],
               "metrics": {
                   "moves": len(moves), "test_season": ts, "rounds": best,
@@ -139,7 +144,6 @@ def fit(prep: dict, weights: dict | None = None, spread: bool = True,
                   "age_support": rule[0],
                   "age_decline_per_year": round(float(np.exp(rule[1]) - 1), 3)}}
     result["values"] = value(pool, result)
-    result["metrics"] |= {"scale_level": result["scale"][0], "scale_spread": result["scale"][1]}
     if verbose:
         print(json.dumps(result["metrics"], indent=2))
     return result
@@ -161,29 +165,46 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
     v["line"] = v["group"].map(GROUP_LINE)
     reg = regulars(v).to_numpy()
     lt, lr = np.log(v.loc[reg, "tm_value"].to_numpy(float)), log_raw[reg]
-    b = 1.0
-    if result["spread"] and reg.sum() >= 20:
-        b = float(np.diff(np.quantile(lt, SCALE_Q))[0] / np.diff(np.quantile(lr, SCALE_Q))[0])
-    a = float(np.median(lt) - b * np.median(lr)) if reg.any() else 0.0
-    result["scale"] = (round(a, 4), round(b, 4))
-    log_p50 = a + b * log_raw
+    to_eur = euro_scale(lr, lt, result["scale_mode"])
     lo, hi = result["band"]
-    v["p10"], v["p50"], v["p90"] = (np.exp(log_p50 + b * lo), np.exp(log_p50),
-                                    np.exp(log_p50 + b * hi))
+    v["p10"], v["p50"], v["p90"] = (np.exp(to_eur(log_raw + lo)), np.exp(to_eur(log_raw)),
+                                    np.exp(to_eur(log_raw + hi)))
+    # local slope of the scale at each player, so the drivers are in euros
+    slope = (to_eur(log_raw + 0.05) - to_eur(log_raw - 0.05)) / 0.1
     cap = result["cap"]
     v["capped"] = v["p50"] > cap
     v[["p10", "p50", "p90"]] = v[["p10", "p50", "p90"]].clip(upper=cap)
     v["low_confidence"] = v["capped"] | (v["minutes_best"] < LOW_MINUTES)
     v["gap"] = v["p50"] / v["tm_value"] - 1
-    v["drivers"] = drivers(result["model"], X, v["p50"], b)
+    v["drivers"] = drivers(result["model"], X, v["p50"], slope)
     v["components"] = [{c: round(float(norm.cdf(r[f"z_{c}"]) * 100), 1) for c in COMPONENTS}
                        for _, r in v.iterrows()]
     return v
 
 
-def drivers(model, X: pd.DataFrame, p50: pd.Series, b: float) -> list[dict]:
-    """TreeSHAP in log space, scaled to the euro scale: performance, age, position."""
-    c = model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)[:, :-1] * b
+def euro_scale(log_raw_reg: np.ndarray, log_tm_reg: np.ndarray, mode: str):
+    """Map the curve's raw log values onto euros, using regulars on both sides.
+    rank: quantile mapping (Mercato's order, Transfermarkt's price list).
+    linear: match level and spread. level: match the median only."""
+    if len(log_raw_reg) < 20:
+        return lambda x: np.asarray(x, dtype=float)
+    if mode == "rank":
+        qs = np.linspace(0, 1, 201)
+        xs, ys = np.quantile(log_raw_reg, qs), np.quantile(log_tm_reg, qs)
+        xs = xs + np.arange(len(xs)) * 1e-9  # strictly increasing for interp
+        return lambda x: np.interp(np.asarray(x, dtype=float), xs, ys)
+    b = 1.0
+    if mode == "linear":
+        b = float(np.diff(np.quantile(log_tm_reg, SCALE_Q))[0]
+                  / np.diff(np.quantile(log_raw_reg, SCALE_Q))[0])
+    a = float(np.median(log_tm_reg) - b * np.median(log_raw_reg))
+    return lambda x: a + b * np.asarray(x, dtype=float)
+
+
+def drivers(model, X: pd.DataFrame, p50: pd.Series, slope) -> list[dict]:
+    """TreeSHAP in log space, through the euro scale: performance, age, position."""
+    c = (model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)[:, :-1]
+         * np.asarray(slope, dtype=float)[:, None])
     c = pd.DataFrame(c, columns=X.columns, index=X.index)
     parts = pd.DataFrame({"performance": c["score"],
                           "age": c["age_under_peak"] + c["age_over_peak"],
@@ -251,7 +272,7 @@ def backtest_rows(d: Data, horizon_days: int = 365):
     return rows, later, t0
 
 
-def backtest(d: Data, weights: dict | None = None, spread: bool = True,
+def backtest(d: Data, weights: dict | None = None, scale: str = "rank",
              horizon_days: int = 365, min_test_moves: int = 200,
              names: dict | None = None) -> dict:
     """Value everyone as of a year ago with only what was known then (fees before then,
@@ -260,7 +281,7 @@ def backtest(d: Data, weights: dict | None = None, spread: bool = True,
     players rise anyway and that isn't skill."""
     rows, later, t0 = backtest_rows(d, horizon_days)
     prep = prepare(d, rows, t0, min_test_moves)
-    v = fit(prep, weights, spread, verbose=False)["values"]
+    v = fit(prep, weights, scale, verbose=False)["values"]
     v["tm_later"] = v["player_id"].map(later)
     v = v[regulars(v) & ~v["low_confidence"] & (v["tm_later"] > 0)].copy()
     v["gap0"] = np.log(v["p50"] / v["tm_value"])
@@ -277,7 +298,7 @@ def backtest(d: Data, weights: dict | None = None, spread: bool = True,
            "top_quintile_beat_peers": f"{(top['move_r'] > 0).mean():.0%}",
            "top_minus_bottom": f"{np.exp(by_q.iloc[-1] - by_q.iloc[0]) - 1:+.1%}"}
     if names is not None:
-        pick = top.sort_values("gap0_r", ascending=False).head(10)
+        pick = top[top["tm_value"] >= 5e6].sort_values("gap0_r", ascending=False).head(10)
         out["most_undervalued_then"] = [
             f"{names.get(x.player_id, x.player_id)}: Mercato €{x.p50 / 1e6:.0f}m, TM "
             f"€{x.tm_value / 1e6:.0f}m then, €{x.tm_later / 1e6:.0f}m now"
@@ -298,7 +319,7 @@ def save(result: dict, values: pd.DataFrame) -> dict:
     ref = result["ref"]
     (out / "meta.json").write_text(json.dumps({
         "weights": ref["weights"], "band": result["band"], "age_rule": result["age_rule"],
-        "scale": result["scale"], "cap": result["cap"], "metrics": result["metrics"],
+        "scale": result["scale_mode"], "cap": result["cap"], "metrics": result["metrics"],
         "reference": {"components": {c: {g: list(map(float, a)) for g, a in by.items()}
                                      for c, by in ref["components"].items()},
                       "score": {g: list(map(float, a)) for g, a in ref["score"].items()}},

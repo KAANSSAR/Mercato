@@ -33,9 +33,9 @@ def without(component: str) -> dict:
 
 
 V2_VARIANTS = {
-    "v2": {},
-    "v2 level only": {"spread": False},
-    "v2 no team level": {"weights": without("team_level")},
+    "v2.1": {},
+    "v2.1 linear scale": {"scale": "linear"},
+    "v2.1 no team level": {"weights": without("team_level")},
 }
 
 
@@ -74,10 +74,10 @@ def main():
                             for ln, x in c["by_line"].items()}}
         by_name = unique_names(v).reindex(REFERENCE)
         refs[name] = by_name["p50"].map(eur)
-        if name == "v2":
+        if name == "v2.1":
             ratings = by_name["rating"]
     refs["TM value"] = by_name["tm_value"].map(eur)
-    refs["v2 rating"] = ratings
+    refs["rating"] = ratings
     pd.set_option("display.width", 200)
     print()
     print(pd.DataFrame(summary).to_string())
