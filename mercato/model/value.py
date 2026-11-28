@@ -13,6 +13,10 @@ Three steps:
    Europe or buyer, so two players who play the same get the same value wherever they
    play. (v2.0 to v2.2 learned the age effect from fees instead, which over-priced youth
    and dropped players off a cliff after 26; method="curve" keeps that for comparison.)
+   How much an elite season counts and how much later years count (two numbers for the
+   whole market) are read from the market's prices for today's regulars: v2.6 showed this
+   beats reading them from fees on every check (rank agreement 0.81 vs 0.77, backtest
+   spread +24.7% vs +21.7%). prefs="fees" keeps the old way.
 3. Euro scale: Transfermarkt's price list for each line (attack, midfield, defence,
    keepers), measured on regulars. Mercato ranks every player in his line; the defender
    Mercato ranks 20th gets what the 20th most valuable regular defender on Transfermarkt
@@ -63,7 +67,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.6"
+VERSION = "v2.7"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -170,7 +174,7 @@ def _ols_x(li: np.ndarray, line: np.ndarray) -> np.ndarray:
 
 
 def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
-        additive: bool = True, method: str = "projection", prefs: str = "fees",
+        additive: bool = True, method: str = "projection", prefs: str = "market",
         verbose: bool = True) -> dict:
     """method projection (v2.3): projected performance over six years, discounted.
     method curve (v2.2): rating and age through a curve learned from fees."""
@@ -407,7 +411,7 @@ def backtest_rows(d: Data, horizon_days: int = 365):
 
 
 def backtest(d: Data, weights: dict | None = None, scale: str = "rank_line",
-             additive: bool = True, method: str = "projection", prefs: str = "fees",
+             additive: bool = True, method: str = "projection", prefs: str = "market",
              horizon_days: int = 365, min_test_moves: int = 200,
              names: dict | None = None, prep: dict | None = None) -> dict:
     """Value everyone as of a year ago with only what was known then (fees before then,

@@ -70,7 +70,7 @@ def fit_offsets(team_elo: pd.DataFrame, gfr_clubs: pd.DataFrame,
     raw = {lg: scale * theirs[lg] - ours[lg] for lg in both}
     top = [raw[lg] for lg in TOP5 if lg in raw]
     c = float(np.mean(top)) if top else 0.0
-    return {"offsets": {lg: round(v - c, 1) for lg, v in raw.items()},
+    return {"offsets": {lg: round(float(v - c), 1) for lg, v in raw.items()},
             "scale": round(scale, 2), "clubs": len(m)}
 
 
