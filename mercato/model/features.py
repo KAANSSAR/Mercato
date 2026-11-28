@@ -1,13 +1,17 @@
 """Player features at a point in time, from Transfermarkt appearances and Mercato Elo.
 
-For each (player, as_of date) we look back one year (and the year before that):
+For each (player, as_of date) we look at the last two years, so one injured season
+doesn't erase a player (v1 read Rodri's ACL year as decline):
 
-- minutes, appearances, minutes share of his club's games
-- goals, assists and goal involvements per 90, each goal or assist weighted by the
+- level: the better of the last two years for minutes and minutes share
+- recency: minutes in the last year, unconstrained, so genuine decline still shows
+- goals, assists and goal involvements per 90 over both years, each weighted by the
   opponent's Elo, then shrunk towards his position's average for small samples
 - Champions League and Europa League minutes over two years (proven at the top level)
-- top-5 league minutes, his club's Elo, the league he plays in
-- age, age squared, position group
+- top-5 league minutes over two years, his club's Elo, the league he plays in
+- age as years under and over 27, so value has to fall past the peak even where
+  there are almost no fees to learn from (v1 valued a 38-year-old like a 33-year-old)
+- position group
 
 Nothing here uses market values: they are the benchmark, never an input.
 """
@@ -22,11 +26,13 @@ TOP5 = ["GB1", "ES1", "IT1", "L1", "FR1"]
 GROUPS = ["GK", "CB", "FB", "DM", "CM", "AM", "W", "ST"]
 LEAGUES = TOP5 + ["other"]
 
-NUMERIC = ["age", "age2", "minutes_1y", "minutes_prev", "apps_1y", "minutes_share",
-           "g90", "a90", "ga90", "ucl_minutes_2y", "uel_minutes_2y", "top5_minutes_1y",
-           "club_elo", "year"]
-MONOTONE_UP = {"minutes_1y", "minutes_share", "g90", "a90", "ga90", "ucl_minutes_2y",
-               "club_elo", "top5_minutes_1y"}
+PEAK_AGE = 27.0
+NUMERIC = ["age_under_peak", "age_over_peak", "minutes_best", "minutes_1y", "share_best",
+           "apps_1y", "g90", "a90", "ga90", "ucl_minutes_2y", "uel_minutes_2y",
+           "top5_minutes_2y", "club_elo", "year"]
+MONOTONE = {"minutes_best": 1, "share_best": 1, "g90": 1, "a90": 1, "ga90": 1,
+            "ucl_minutes_2y": 1, "top5_minutes_2y": 1, "club_elo": 1,
+            "age_over_peak": -1}
 
 
 def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame) -> pd.DataFrame:
@@ -68,7 +74,7 @@ def raw_features(rows: pd.DataFrame, apps: pd.DataFrame, games: pd.DataFrame,
         a = by_player.get(r.player_id)
         rec = {"minutes_1y": 0.0, "minutes_prev": 0.0, "apps_1y": 0, "goals_w": 0.0,
                "assists_w": 0.0, "ucl_minutes_2y": 0.0, "uel_minutes_2y": 0.0,
-               "top5_minutes_1y": 0.0, "club_games_1y": 0}
+               "top5_minutes_2y": 0.0, "club_games_1y": 0, "club_games_prev": 0}
         if a is not None:
             last = a[(a["date"] < t) & (a["date"] >= y1)]
             prev = a[(a["date"] < y1) & (a["date"] >= y2)]
@@ -81,13 +87,14 @@ def raw_features(rows: pd.DataFrame, apps: pd.DataFrame, games: pd.DataFrame,
                 assists_w=float(last["assists_w"].sum()),
                 ucl_minutes_2y=float(two.loc[two["competition_id"] == "CL", "minutes_played"].sum()),
                 uel_minutes_2y=float(two.loc[two["competition_id"] == "EL", "minutes_played"].sum()),
-                top5_minutes_1y=float(last.loc[last["competition_id"].isin(TOP5),
-                                               "minutes_played"].sum()),
+                top5_minutes_2y=float(two.loc[two["competition_id"].isin(TOP5),
+                                              "minutes_played"].sum()),
             )
-            clubs = last["player_club_id"].unique()
-            rec["club_games_1y"] = int(sum(
-                ((d < t.to_datetime64()) & (d >= y1.to_datetime64())).sum()
-                for d in (by_club.get(c, np.array([], dtype="datetime64[ns]")) for c in clubs)))
+            for key, part, lo, hi in (("club_games_1y", last, y1, t), ("club_games_prev", prev, y2, y1)):
+                rec[key] = int(sum(
+                    ((d < hi.to_datetime64()) & (d >= lo.to_datetime64())).sum()
+                    for d in (by_club.get(c, np.array([], dtype="datetime64[ns]"))
+                              for c in part["player_club_id"].unique())))
         out.append(rec)
     feats = pd.concat([rows.reset_index(drop=True), pd.DataFrame(out)], axis=1)
 
@@ -108,7 +115,7 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     """Per 90 with shrinkage towards the position average, age, encodings.
     group_means from training are reused at prediction time."""
     f = feats.copy()
-    mins = f["minutes_1y"].clip(lower=0)
+    mins = (f["minutes_1y"] + f["minutes_prev"]).clip(lower=0)  # per 90 over both years
     for k, src in [("g90", "goals_w"), ("a90", "assists_w")]:
         f[f"{k}_raw"] = np.where(mins > 0, f[src] / mins.where(mins > 0, 1) * 90, 0.0)
     f["ga90_raw"] = f["g90_raw"] + f["a90_raw"]
@@ -122,12 +129,16 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
         prior = f["group"].map(group_means[k]).fillna(0)
         f[k] = (mins * f[f"{k}_raw"] + K_MINUTES * prior) / (mins + K_MINUTES)
 
-    f["minutes_share"] = np.where(f["club_games_1y"] > 0,
-                                  f["minutes_1y"] / (90 * f["club_games_1y"].clip(lower=1)), 0)
-    f["minutes_share"] = f["minutes_share"].clip(0, 1)
+    share_1y = np.where(f["club_games_1y"] > 0,
+                        f["minutes_1y"] / (90 * f["club_games_1y"].clip(lower=1)), 0)
+    share_prev = np.where(f["club_games_prev"] > 0,
+                          f["minutes_prev"] / (90 * f["club_games_prev"].clip(lower=1)), 0)
+    f["share_best"] = np.clip(np.maximum(share_1y, share_prev), 0, 1)
+    f["minutes_best"] = np.maximum(f["minutes_1y"], f["minutes_prev"])
     birth = pd.to_datetime(f["birth"])
     f["age"] = (pd.to_datetime(f["as_of"]) - birth).dt.days / 365.25
-    f["age2"] = f["age"] ** 2
+    f["age_under_peak"] = (PEAK_AGE - f["age"]).clip(lower=0)
+    f["age_over_peak"] = (f["age"] - PEAK_AGE).clip(lower=0)
     f["year"] = pd.to_datetime(f["as_of"]).map(lambda d: d.year if d.month >= 7 else d.year - 1)
     f["league"] = f["league"].where(f["league"].isin(TOP5), "other")
     return f, group_means
@@ -143,4 +154,4 @@ def design_matrix(f: pd.DataFrame) -> pd.DataFrame:
 
 
 def monotone_constraints(columns: list[str]) -> tuple[int, ...]:
-    return tuple(1 if c in MONOTONE_UP else 0 for c in columns)
+    return tuple(MONOTONE.get(c, 0) for c in columns)

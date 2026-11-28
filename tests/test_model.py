@@ -1,6 +1,8 @@
 """End-to-end test of the valuation model on a synthetic football world where we know
 what drives fees."""
 
+import itertools
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -129,3 +131,61 @@ def test_current_valuations_track_true_quality(trained):
         assert np.corrcoef(np.log(v.loc[m, "p50"]), q[m])[0, 1] > 0.4, group
     d0 = v["drivers"].iloc[0]
     assert len(d0) == 6 and all(isinstance(x, float) for x in d0.values())
+
+
+def _row(trained):
+    from mercato.model.features import design_matrix
+    from mercato.model.train import current_rows, features_for
+    d, _, r = trained
+    f, _ = features_for(current_rows(d).head(1), d, r["group_means"])
+    f["year"] = r["level"]
+    return design_matrix(f)[r["columns"]], r
+
+
+def test_value_never_rises_past_peak_age(trained):
+    from mercato.model.train import predict
+    X, r = _row(trained)
+    vals = []
+    for over in [0, 3, 6, 9, 11]:
+        x = X.copy()
+        x["age_under_peak"], x["age_over_peak"] = 0.0, float(over)
+        vals.append(predict(r["models"], x)["p50"].iloc[0])
+    assert all(b <= a + 1e-6 for a, b in itertools.pairwise(vals)), vals
+
+
+def test_one_injured_season_does_not_erase_a_player(trained):
+    from mercato.model.train import predict
+    X, r = _row(trained)
+    healthy_then_injured, poor_both = X.copy(), X.copy()
+    healthy_then_injured[["minutes_best", "share_best", "minutes_1y"]] = [3000.0, 0.95, 300.0]
+    poor_both[["minutes_best", "share_best", "minutes_1y"]] = [400.0, 0.12, 300.0]
+    a = predict(r["models"], healthy_then_injured)["p50"].iloc[0]
+    b = predict(r["models"], poor_both)["p50"].iloc[0]
+    assert a > b
+
+
+def test_cap_holds(trained):
+    from mercato.model.train import predict
+    X, r = _row(trained)
+    x = X.copy()
+    x[["g90", "a90", "ga90"]] = 5.0  # absurd output: would extrapolate
+    x["club_elo"] = 2400.0
+    p = predict(r["models"], x, cap=r["cap"])
+    assert (p[["p10", "p50", "p90"]] <= r["cap"] + 1e-6).all(axis=None)
+
+
+def test_minutes_best_takes_the_better_season():
+    import pandas as pd
+
+    from mercato.model.features import finish
+    f = pd.DataFrame({"player_id": [1], "as_of": ["2025-08-01"], "birth": ["2000-08-01"],
+                      "group": ["CB"], "league": ["GB1"], "club_id": [1], "club_elo": [1700.0],
+                      "minutes_1y": [300.0], "minutes_prev": [3000.0], "apps_1y": [4],
+                      "goals_w": [1.0], "assists_w": [0.0], "ucl_minutes_2y": [0.0],
+                      "uel_minutes_2y": [0.0], "top5_minutes_2y": [3300.0],
+                      "club_games_1y": [38], "club_games_prev": [38]})
+    out, _ = finish(f)
+    assert out["minutes_best"].iloc[0] == 3000.0
+    assert out["share_best"].iloc[0] == pytest.approx(3000 / (90 * 38))
+    assert out["age_under_peak"].iloc[0] == pytest.approx(2.0, abs=0.01)
+    assert out["age_over_peak"].iloc[0] == 0.0

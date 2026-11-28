@@ -42,7 +42,7 @@ from mercato.sources.tm_datasets import (
     read,
 )
 
-VERSION = "v1"
+VERSION = "v1.1"
 QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
 MIN_TRAIN_FEE = 500_000
 FIRST_TRAIN_SEASON = 2015
@@ -124,10 +124,17 @@ def fit_quantiles(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
     return models, best
 
 
-def predict(models: dict, X: pd.DataFrame) -> pd.DataFrame:
+def predict(models: dict, X: pd.DataFrame, cap: float | None = None) -> pd.DataFrame:
+    """Quantiles in euros, sorted so they never cross, capped at the highest
+    inflation-adjusted fee ever paid: beyond that the model would be extrapolating
+    (v1 put Lamine Yamal at €602m)."""
     p = pd.DataFrame({k: np.exp(m.predict(X)) for k, m in models.items()}, index=X.index)
-    s = np.sort(p[["p10", "p50", "p90"]].to_numpy(), axis=1)  # no crossing
-    return pd.DataFrame(s, columns=["p10", "p50", "p90"], index=X.index)
+    s = np.sort(p[["p10", "p50", "p90"]].to_numpy(), axis=1)
+    out = pd.DataFrame(s, columns=["p10", "p50", "p90"], index=X.index)
+    if cap is not None:
+        out["capped"] = out["p50"] > cap
+        out[["p10", "p50", "p90"]] = out[["p10", "p50", "p90"]].clip(upper=cap)
+    return out
 
 
 def drivers(model, X: pd.DataFrame, p50: pd.Series, top: int = 6) -> list[dict]:
@@ -135,11 +142,12 @@ def drivers(model, X: pd.DataFrame, p50: pd.Series, top: int = 6) -> list[dict]:
     contrib = model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)[:, :-1]
     c = pd.DataFrame(contrib, columns=X.columns, index=X.index)
     grouped = pd.DataFrame(index=X.index)
-    grouped["age"] = c[["age", "age2"]].sum(axis=1)
+    grouped["age"] = c[["age_under_peak", "age_over_peak"]].sum(axis=1)
     grouped["position"] = c[[x for x in X.columns if x.startswith("pos_")]].sum(axis=1)
     grouped["league"] = c[[x for x in X.columns if x.startswith("league_")]].sum(axis=1)
     for col in X.columns:
-        if col not in ("age", "age2") and not col.startswith(("pos_", "league_")):
+        if col not in ("age_under_peak", "age_over_peak") and not col.startswith(
+                ("pos_", "league_")):
             grouped[col] = c[col]
     out = []
     for i in X.index:
@@ -190,10 +198,12 @@ def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
 
     allf = pd.concat([f_tr, f_va, f_te], ignore_index=True)
     final, _ = fit_quantiles(design_matrix(allf), allf["y"].to_numpy(), rounds=best)
+    cap = float(rows["fee_adj"].max())
+    metrics["cap_eur"] = round(cap)
     if verbose:
         print(json.dumps({k: v for k, v in metrics.items() if k != "fee_index"}, indent=2))
     return {"models": final, "group_means": gm, "metrics": metrics, "level": level,
-            "columns": list(X_tr.columns)}
+            "columns": list(X_tr.columns), "cap": cap}
 
 
 def current_rows(d: Data) -> pd.DataFrame:
@@ -214,8 +224,9 @@ def value_current(d: Data, result: dict) -> pd.DataFrame:
     f, _ = features_for(rows, d, result["group_means"])
     f["year"] = result["level"]  # today's market level
     X = design_matrix(f)[result["columns"]]
-    p = predict(result["models"], X)
-    out = pd.concat([f[["player_id", "minutes_1y", "tm_value", "group", "age"]], p], axis=1)
+    p = predict(result["models"], X, cap=result.get("cap"))
+    out = pd.concat([f[["player_id", "minutes_1y", "minutes_best", "tm_value", "group",
+                        "age"]], p], axis=1)
     out["drivers"] = drivers(result["models"]["p50"], X, p["p50"])
     out["gap"] = out["p50"] / out["tm_value"] - 1
     return out
@@ -232,7 +243,8 @@ def save(result: dict, values: pd.DataFrame) -> dict:
         m.save_model(out / f"{k}.json")
     (out / "meta.json").write_text(json.dumps(
         {"columns": result["columns"], "group_means": result["group_means"],
-         "level": result["level"], "metrics": result["metrics"]}, indent=2, default=str))
+         "level": result["level"], "cap": result["cap"], "metrics": result["metrics"]},
+        indent=2, default=str))
 
     with connect() as conn, conn.cursor() as cur:
         cur.execute("insert into model_runs (version, test_mdape) values (%s, %s) returning id",
@@ -263,7 +275,7 @@ def main():
 
 def report(d: Data, values: pd.DataFrame) -> None:
     names = dict(zip(d.players["player_id"], d.players["name"]))
-    regulars = values[(values["minutes_1y"] >= 1500) & (values["tm_value"] >= 5e6)].copy()
+    regulars = values[(values["minutes_best"] >= 1500) & (values["tm_value"] >= 5e6)].copy()
     regulars["name"] = regulars["player_id"].map(names)
     cols = ["name", "group", "age", "p10", "p50", "p90", "tm_value", "gap"]
     fmt = {"age": "{:.0f}".format, "gap": "{:+.0%}".format,
