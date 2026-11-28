@@ -9,7 +9,8 @@ import sys
 
 from mercato import service_status
 from mercato.config import COMPETITIONS
-from mercato.sources.api_football import ApiFootball, PlanRestricted
+from mercato.ingest.store import Store
+from mercato.sources.api_football import ApiFootball, BudgetExceeded, PlanRestricted
 
 FINISHED = {"FT", "AET", "PEN"}
 TRACKED = set(COMPETITIONS.values())
@@ -60,6 +61,9 @@ def run(conn, api: ApiFootball, date: str | None = None) -> dict:
         print(f"::warning title=Mercato update gap::Last live update {gap:.0f}h ago. "
               "On the free plan, matches older than yesterday can't be fetched.")
 
+    store = Store(conn)
+    tables: set[tuple[int, int]] = set()
+    pulled = 0
     try:
         fixtures = [f for d in dates for f in api.fixtures_by_date(d)]
         todo = finished_tracked(fixtures, pulled_ids(conn, [f["fixture"]["id"] for f in fixtures]))
@@ -67,15 +71,24 @@ def run(conn, api: ApiFootball, date: str | None = None) -> dict:
             fid = f["fixture"]["id"]
             players = api.fixture_players(fid)
             teams = api.fixture_statistics(fid)
-            # TODO: upsert matches, player_match_stats, team_match_stats; set stats_pulled_at
-            _ = players, teams
+            match_id = store.match(f)
+            store.stats(match_id, players, teams)
+            conn.commit()
+            pulled += 1
+            comp_id, _ = store.comps[f["league"]["id"]]
+            tables.add((comp_id, store.season(f["league"]["season"])))
+    except BudgetExceeded as e:
+        print(f"::warning title=Mercato request budget::{e}")
     except PlanRestricted as e:
         change = service_status.mark_restricted(conn, str(e)) or change
         return {"dates": dates, "skipped": str(e), "change": change, "status": status,
                 "requests": api.requests_made}
 
-    service_status.mark_live_update(conn)
-    return {"dates": dates, "fixtures": len(fixtures), "pulled": len(todo),
+    for comp_id, season_id in tables:
+        store.standings(comp_id, season_id)
+    conn.commit()
+    service_status.mark_live_update(conn)  # last healthy run, matches or not
+    return {"dates": dates, "fixtures": len(fixtures), "pulled": pulled,
             "requests": api.requests_made, "change": change, "status": status}
 
 

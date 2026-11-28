@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     api_football_key: str = ""
     database_url: str = ""
     daily_request_budget: int = 95
+    # Seconds between API calls. Free plan: 10 a minute, so 6.1. Pro allows far more,
+    # so set API_MIN_INTERVAL=0.25 in .env for the backfill month.
+    api_min_interval: float = 6.1
 
 
 settings = Settings()

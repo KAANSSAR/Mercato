@@ -36,7 +36,7 @@ class ApiFootball:
         self.requests_made = 0
         self.remaining_today: int | None = None
         self._last_call = 0.0
-        self.min_interval = 6.1  # seconds, keeps under 10 a minute
+        self.min_interval = settings.api_min_interval
 
     def get(self, path: str, **params) -> dict:
         if self.requests_made >= self.budget:
