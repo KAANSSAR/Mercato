@@ -3,7 +3,10 @@
     uv run python -m mercato.jobs.backfill premier_league 2024 --max 40
     uv run python -m mercato.jobs.backfill all 2023              # every tracked competition
 
-Costs 1 request for the fixture list, then 2 per finished match. Matches already pulled
+Order for a past season: `mercato.mapping.season players <comp> <season>` first (about 35
+requests, matches players by birth date), then this. Clubs are mapped here automatically.
+
+Costs 1 request for the season's clubs, 1 for the fixture list, then 2 per finished match. Matches already pulled
 are skipped, and every API response is cached on disk, so stopping and rerunning is free.
 Each match is committed on its own, so progress survives a crash or the daily limit.
 """
@@ -17,6 +20,13 @@ from mercato.sources.api_football import ApiFootball, BudgetExceeded, PlanRestri
 
 
 def backfill(conn, api: ApiFootball, comp: str, season: int, limit: int | None = None) -> dict:
+    # Map this season's clubs first (1 cached request), so promoted, relegated and European
+    # clubs attach to their Transfermarkt records instead of becoming placeholders
+    from mercato.mapping.season import map_clubs
+    try:
+        map_clubs(conn, api, comp, season)
+    except PlanRestricted as e:
+        return {"competition": comp, "season": season, "error": str(e)}
     store = Store(conn)
     try:
         fixtures = api.cached("fixtures", league=COMPETITIONS[comp], season=season)["response"]

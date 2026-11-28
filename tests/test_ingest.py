@@ -88,6 +88,9 @@ class FakeApi:
 
     def cached(self, path, **p):
         self.requests_made += 1
+        if path == "teams":
+            return {"response": [{"team": {"id": 42, "name": "Arsenal"}},
+                                 {"team": {"id": 40, "name": "Liverpool"}}]}
         if path == "fixtures":
             return {"response": self.fixtures_list}
         return {"response": PLAYERS if path == "fixtures/players" else TEAMS}
@@ -103,8 +106,8 @@ def test_backfill_against_postgres():
         for t in ["standings", "player_match_stats", "team_match_stats", "matches"]:
             conn.execute(f"delete from {t}")
         conn.execute("delete from id_map where match_method = 'api_only'")
-        conn.execute("insert into competitions (api_football_id, name, kind) "
-                     "values (39, 'Premier League', 'league') on conflict do nothing")
+        conn.execute("insert into competitions (api_football_id, name, kind, tm_code) "
+                     "values (39, 'Premier League', 'league', 'GB1') on conflict do nothing")
         conn.execute("insert into seasons (year) values (2024) on conflict do nothing")
         conn.commit()
 
@@ -114,17 +117,17 @@ def test_backfill_against_postgres():
         api = FakeApi(fx)
         r = backfill(conn, api, "premier_league", 2024)
         assert r["pulled"] == 2 and r["player_rows"] == 6 and r["standings_rows"] == 2
-        assert api.requests_made == 5  # 1 list + 2 per finished match
+        assert api.requests_made == 6  # 1 clubs + 1 list + 2 per finished match
 
         # rerun: nothing to do, no stats requests
         api2 = FakeApi(fx)
         r2 = backfill(conn, api2, "premier_league", 2024)
-        assert r2["pulled"] == 0 and api2.requests_made == 1
+        assert r2["pulled"] == 0 and api2.requests_made == 2
 
         top = conn.execute("""select c.name, s.points, s.played from standings s
                               join clubs c on c.id = s.club_id
                               order by s.as_of desc, s.position limit 1""").fetchone()
-        assert top == ("Arsenal", 4, 2)
+        assert top[0] in ("Arsenal", "Arsenal FC") and top[1:] == (4, 2)
         xg = conn.execute("select count(*) from team_match_stats where xg is not null").fetchone()
         assert xg[0] == 4
 

@@ -44,6 +44,13 @@ def read(name: str, data_dir: Path = DATA_DIR) -> pd.DataFrame:
     raise FileNotFoundError(f"{name}.csv not found in {data_dir}")
 
 
+def _read_optional(name: str, data_dir: Path) -> pd.DataFrame | None:
+    try:
+        return read(name, data_dir)
+    except FileNotFoundError:
+        return None
+
+
 def position_group(sub_position, position) -> str | None:
     if isinstance(sub_position, str) and sub_position in POSITION_MAP:
         return POSITION_MAP[sub_position]
@@ -131,11 +138,17 @@ def load(data_dir: Path = DATA_DIR) -> dict:
     rel = relevant_players(players, transfers, club_ids)
 
     with connect() as conn, job_run(conn, "tm_datasets_load") as stats:
-        # Clubs: top 5 plus any club a relevant player moved between
+        # Clubs: every club in any game (European opponents included), any club a relevant
+        # player moved between, and clubs.csv last so its names win
         tr = transfers[transfers["player_id"].isin(rel["player_id"])]
-        names = dict(zip(clubs["club_id"], clubs["name"]))
+        names = {}
+        games = _read_optional("games", data_dir)
+        if games is not None and {"home_club_name", "away_club_name"} <= set(games.columns):
+            names.update(dict(zip(games["home_club_id"], games["home_club_name"])))
+            names.update(dict(zip(games["away_club_id"], games["away_club_name"])))
         names.update(dict(zip(tr["from_club_id"], tr["from_club_name"])))
         names.update(dict(zip(tr["to_club_id"], tr["to_club_name"])))
+        names.update(dict(zip(clubs["club_id"], clubs["name"])))
         comp = dict(zip(clubs["club_id"], clubs["domestic_competition_id"]))
         cur_clubs = current_top5_club_ids(clubs)
         club_rows = [
