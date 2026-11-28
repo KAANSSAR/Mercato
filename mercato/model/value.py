@@ -7,7 +7,7 @@
 Three steps:
 
 1. Rating (model.rating): how well he plays for his position, 0 to 100, stats only.
-2. Projection (model.projection, v2.3): his rating over the next six seasons, from how
+2. Projection (model.projection): his rating over every season he has left, from how
    ratings have actually moved with age since 2016, discounted into one index. Fees only
    tune how much an elite season counts and how much later years count. No club, league,
    Europe or buyer, so two players who play the same get the same value wherever they
@@ -39,6 +39,7 @@ from scipy.stats import norm, spearmanr
 from mercato.model.features import GROUP_LINE, RECENCY, finish, raw_features
 from mercato.model.fee_index import build_index, deflate
 from mercato.model.projection import (
+    HORIZON,
     ONE_SEASON,
     fit_paths,
     fit_preferences,
@@ -61,7 +62,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.3"
+VERSION = "v2.4"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -292,10 +293,10 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
         proj[np.isnan(P)] = np.nan
         for comp, row in zip(v["components"], proj):
             comp["projected_rating"] = [None if np.isnan(x) else round(float(x), 1)
-                                        for x in row[1:]]
+                                        for x in row[1:HORIZON + 1]]
         has = ~np.isnan(proj).all(axis=1)
         v["projected_peak"] = np.nan
-        v.loc[has, "projected_peak"] = np.nanmax(proj[has], axis=1)
+        v.loc[has, "projected_peak"] = np.nanmax(proj[has, :HORIZON + 1], axis=1)
     return v
 
 

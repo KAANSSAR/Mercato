@@ -201,3 +201,15 @@ def test_dropouts_count_as_weak_seasons():
     # remove every season after 30: those players "drop out" and pull the path down
     gone = fit_paths(s[s["age"] < 30])["coefs"]["ATT"][3]
     assert gone[2] < fit_paths(s)["coefs"]["ATT"][3][2] or gone[0] < full
+
+
+def test_current_season_always_counts_and_youth_gets_its_prime():
+    from mercato.model.projection import fit_paths, log_index, project
+    paths = fit_paths(_snaps())
+    f = pd.DataFrame({"group": ["ST", "ST", "ST"], "age": [38.5, 20.0, 31.0],
+                      "score": [1.0, 0.5, 0.5]})
+    P = project(f, paths)
+    assert not np.isnan(P[0, 0]) and np.isnan(P[0, 1:]).all()  # Lewandowski
+    li = log_index(P, 0.75, 0.9)
+    assert np.isfinite(li[0]) and li[0] > log_index(P * 0 - 5, 0.75, 0.9)[0]
+    assert li[1] > li[2]  # same level: 20-year-old has his prime ahead

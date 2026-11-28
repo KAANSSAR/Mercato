@@ -12,13 +12,17 @@ says how much of today's level is real. A player who is no longer a top-5 regula
 years later (retired, released, gone to a smaller league, out injured all season) counts
 as a weak season for his line, so survivors alone don't make old age look kind.
 
-The value index is the next six seasons of projected performance, discounted:
+The value index is every season he has left, projected and discounted:
 
-    V = sum over k = 0..6 of  delta^k * exp(beta * projected score in year k)
+    V = sum over k = 0..career end of  delta^k * exp(beta * projected score in year k)
+
+Years 1 to 6 come from the direct fits; after that the one-year step repeats. v2.3 stopped
+at six seasons, which is a 30-year-old's whole career but stops a 20-year-old at 26,
+before his prime, so Kane came out far above Transfermarkt and Hato far below.
 
 beta: how much an elite season is worth next to a good one. delta: how much later years
 count next to now. Both are fitted on real fees (the only thing fees decide); everything
-else is on-pitch data. No season counts past age 37.
+else is on-pitch data. No future season counts past age 37; the current one always does.
 
 Replaces the age curve learned from fees, where value fell off a cliff after 26 because
 older players get sold cheaply on expiring contracts, not because they play worse
@@ -34,7 +38,8 @@ from mercato.model.features import GROUP_LINE
 from mercato.sources.tm_datasets import TOP5
 
 ONE_SEASON = (1.0, 0.0, 0.0)
-HORIZON = 6
+HORIZON = 6        # horizons fitted directly from the snapshots (shown on player pages)
+CAREER_YEARS = 20  # value counts every season to MAX_AGE; beyond HORIZON, year-on-year steps
 FIRST_SNAPSHOT = 2016
 SNAP_MINUTES = 900
 DROPOUT_Q = 0.10   # a player who drops out counts as this quantile of his line's seasons
@@ -42,7 +47,7 @@ MAX_AGE = 37
 MIN_PAIRS = 60
 LINES = ("ATT", "MID", "DEF", "GK")
 BETAS = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
-DELTAS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+DELTAS = (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0)
 
 
 def snapshot_rows(apps: pd.DataFrame, clubs: pd.DataFrame, info: pd.DataFrame,
@@ -101,8 +106,9 @@ def fit_paths(snaps: pd.DataFrame) -> dict:
 
 
 def project(f: pd.DataFrame, paths: dict) -> np.ndarray:
-    """Projected score for years 0 (now) to HORIZON; NaN past MAX_AGE."""
-    out = np.full((len(f), HORIZON + 1), np.nan)
+    """Projected score for years 0 (now) to CAREER_YEARS; NaN for future seasons past
+    MAX_AGE. Years up to HORIZON from the direct fits, then one-year steps."""
+    out = np.full((len(f), CAREER_YEARS + 1), np.nan)
     out[:, 0] = f["score"].to_numpy(float)
     line = f["group"].map(GROUP_LINE).to_numpy()
     age = f["age"].to_numpy(float)
@@ -113,8 +119,13 @@ def project(f: pd.DataFrame, paths: dict) -> np.ndarray:
         X = _x(out[m, 0], age[m])
         for k, c in by_k.items():
             out[m, k] = X @ c
-    ages = age[:, None] + np.arange(HORIZON + 1)[None, :]
-    out[ages > MAX_AGE] = np.nan
+        step = by_k[1]
+        for k in range(HORIZON + 1, CAREER_YEARS + 1):
+            out[m, k] = _x(out[m, k - 1], age[m] + k - 1) @ step
+    ages = age[:, None] + np.arange(CAREER_YEARS + 1)[None, :]
+    future = np.zeros_like(out, dtype=bool)
+    future[:, 1:] = True
+    out[(ages > MAX_AGE) & future] = np.nan
     return out
 
 
