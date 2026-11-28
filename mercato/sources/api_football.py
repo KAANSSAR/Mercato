@@ -97,4 +97,9 @@ class ApiFootball:
         """Account status. Does not count against the daily quota."""
         resp = self.client.get("/status")
         resp.raise_for_status()
-        return resp.json()["response"]
+        body = resp.json()
+        # a bad or revoked key comes back as errors plus an empty list, not a status
+        if body.get("errors") or not isinstance(body.get("response"), dict):
+            raise RuntimeError(f"API-Football rejected the request: {body.get('errors')}. "
+                               "Check API_FOOTBALL_KEY in .env (and the GitHub secret).")
+        return body["response"]

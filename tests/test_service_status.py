@@ -126,3 +126,17 @@ def test_daily_limit_error_raises_budget_exceeded():
         api.get("players/squads", team=42)
     with pytest.raises(BudgetExceeded):  # no further calls once the limit is known
         api.get("players/squads", team=43)
+
+
+def test_bad_key_gives_a_clear_error():
+    import httpx
+    import pytest
+
+    from mercato.sources.api_football import ApiFootball
+
+    def handler(request):
+        return httpx.Response(200, json={"errors": {"token": "Error/Missing application key."},
+                                         "response": []})
+    api = ApiFootball(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="API_FOOTBALL_KEY"):
+        api.status()
