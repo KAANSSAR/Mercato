@@ -1,10 +1,10 @@
 name: gfr
 
-# Weekly snapshot of Global Football Rankings' league and club ratings.
-# Two page loads a week. Fails (and GitHub emails you) if the page layout changes.
+# Daily snapshot of Global Football Rankings' league and club ratings (they update with
+# every result). Two page loads a day. Fails (and GitHub emails you) if the layout changes.
 on:
   schedule:
-    - cron: "41 3 * * 2"  # Tuesdays 03:41 UTC, after the weekend's results are in
+    - cron: "41 3 * * *"  # 03:41 UTC daily, after the night's results
   workflow_dispatch:
 
 jobs:

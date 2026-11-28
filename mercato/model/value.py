@@ -37,7 +37,8 @@ import xgboost as xgb
 from scipy.stats import norm, spearmanr
 
 from mercato.model.features import GROUP_LINE, RECENCY, finish, raw_features
-from mercato.model.fee_index import build_index, deflate
+from mercato.model.fee_index import build_index, deflate, season_of
+from mercato.model.leagues import apply_league_factors, league_factors
 from mercato.model.projection import (
     HORIZON,
     ONE_SEASON,
@@ -62,7 +63,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.5"
+VERSION = "v2.6"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -134,11 +135,16 @@ def _curve(X, y, X_val=None, y_val=None, rounds=None,
 # ---------- fit ----------
 
 def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int = 200,
-            projection: bool = True) -> dict:
+            projection: bool = True, league_factors_on: bool = True) -> dict:
     """Features for the pool being valued (also the rating's reference), for every paid
     move before the cutoff and, for the projection, for yearly snapshots of top-5
     regulars. Computed once, shared by variants."""
     cutoff = pd.Timestamp(cutoff if cutoff is not None else pool_rows["as_of"].max())
+    lf = {}
+    if league_factors_on:
+        apps = d.prepared()[0]
+        lf = league_factors(apps, d.clubs, d.players, before_season=int(season_of(cutoff)))
+        apply_league_factors(apps, lf)
     pool, gm = base_features(d, pool_rows)
     rows = training_rows(d)
     rows = rows[rows["as_of"] < cutoff].reset_index(drop=True)
@@ -149,7 +155,7 @@ def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int =
     rows["y"] = np.log(rows["fee_adj"])
     moves, _ = base_features(d, rows, gm)
     out = {"pool": pool, "moves": moves, "index": index, "test_season": test_season,
-           "cutoff": cutoff}
+           "cutoff": cutoff, "league_factors": lf}
     if projection:
         snaps = snapshot_rows(d.apps, d.clubs, _player_info(d), cutoff)
         apps, games, elo = d.prepared()
@@ -164,7 +170,8 @@ def _ols_x(li: np.ndarray, line: np.ndarray) -> np.ndarray:
 
 
 def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
-        additive: bool = True, method: str = "projection", verbose: bool = True) -> dict:
+        additive: bool = True, method: str = "projection", prefs: str = "fees",
+        verbose: bool = True) -> dict:
     """method projection (v2.3): projected performance over six years, discounted.
     method curve (v2.2): rating and age through a curve learned from fees."""
     assert scale in SCALES, scale
@@ -188,7 +195,16 @@ def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
         P = project(moves, paths)
         line = moves["group"].map(GROUP_LINE).to_numpy()
         trva = (tr | va).to_numpy()
-        beta, delta, rho = fit_preferences(P[trva], line[trva], y[trva])
+        if prefs == "market":
+            # how much an elite season and later years count, read from the market's
+            # prices for today's regulars (two numbers for everyone, never per player)
+            reg = regulars(pool.assign(line=pool["group"].map(GROUP_LINE))).to_numpy()
+            Pp = project(pool[reg], paths)
+            beta, delta, rho = fit_preferences(
+                Pp, pool.loc[reg, "group"].map(GROUP_LINE).to_numpy(),
+                np.log(pool.loc[reg, "tm_value"].to_numpy(float)))
+        else:
+            beta, delta, rho = fit_preferences(P[trva], line[trva], y[trva])
         li = log_index(P, beta, delta)
         X = _ols_x(li, line)
         c_tr = np.linalg.lstsq(X[tr], y[tr], rcond=None)[0]
@@ -197,8 +213,8 @@ def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
         log_te = X[te] @ c_eval
         coef = np.linalg.lstsq(X, y, rcond=None)[0]
         result |= {"paths": paths, "beta": beta, "delta": delta, "ols": coef}
-        metrics |= {"snapshots": len(snaps), "beta": beta, "delta": delta,
-                    "fee_rank_corr_train": round(rho, 3),
+        metrics |= {"snapshots": len(snaps), "beta": beta, "delta": delta, "prefs": prefs,
+                    "prefs_rank_corr": round(rho, 3),
                     "fee_rank_corr_test": round(float(spearmanr(li[te], y[te])[0]), 3)}
     else:
         X = design(moves)
@@ -391,7 +407,7 @@ def backtest_rows(d: Data, horizon_days: int = 365):
 
 
 def backtest(d: Data, weights: dict | None = None, scale: str = "rank_line",
-             additive: bool = True, method: str = "projection",
+             additive: bool = True, method: str = "projection", prefs: str = "fees",
              horizon_days: int = 365, min_test_moves: int = 200,
              names: dict | None = None, prep: dict | None = None) -> dict:
     """Value everyone as of a year ago with only what was known then (fees before then,
@@ -400,7 +416,7 @@ def backtest(d: Data, weights: dict | None = None, scale: str = "rank_line",
     players rise anyway and that isn't skill."""
     rows, later, t0 = backtest_rows(d, horizon_days)
     prep = prep or prepare(d, rows, t0, min_test_moves)
-    v = fit(prep, weights, scale, additive, method, verbose=False)["values"]
+    v = fit(prep, weights, scale, additive, method, prefs, verbose=False)["values"]
     v["tm_later"] = v["player_id"].map(later)
     v = v[regulars(v) & ~v["low_confidence"] & (v["tm_later"] > 0)].copy()
     v["gap0"] = np.log(v["p50"] / v["tm_value"])

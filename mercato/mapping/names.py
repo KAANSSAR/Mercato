@@ -18,6 +18,8 @@ CLUB_ALIASES = {
     "milano": "milan", "wolverhampton": "wolves", "wanderers": "",
     "hove": "", "nottm": "nottingham", "nott": "nottingham", "rennais": "rennes",
     "man": "manchester", "utd": "united", "saint": "st", "sankt": "st",
+    "sint": "st", "monchengladbach": "gladbach", "olympiakos": "olympiacos",
+    "truidense": "truiden", "brestois": "brest", "moskva": "moscow",
 }
 POSITION_GROUPS = {
     "Goalkeeper": {"GK"},

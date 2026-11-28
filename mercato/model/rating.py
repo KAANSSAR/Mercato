@@ -46,7 +46,15 @@ WEIGHTS = {
 }
 # goals and assists in the output component, by line
 OUTPUT_MIX = {"ATT": (1.0, 0.75), "MID": (1.0, 1.0), "DEF": (1.0, 1.0), "GK": (0.0, 0.0)}
-K_GAMES = 15.0  # shrinkage for impact and defence, in full games
+# Impact and defence are team results in his games: shared with ten teammates, so they
+# need more games before they say much about him (v2.5 put Getafe's whole defensive
+# season on Juan Iglesias, and one Hoffenheim season on Wouter Burger)
+K_GAMES = 30.0  # shrinkage for impact and defence, in full games
+TEAM_Z_CAP = 2.5
+TEAM_SHARED = ("impact", "defence")
+# A position's spread can't be much tighter than its line's: defensive midfielders barely
+# score, so four goals and eight assists read as +4 spreads (Burger) without this floor
+LINE_FLOOR = 0.75
 K_LEVEL = 5.0   # shrinkage for opposition and team level, in full games
 ELO_PRIOR = 1500.0
 Z_CAP = 4.0     # a component can lift a player at most four spreads above typical
@@ -150,7 +158,8 @@ def _scores(f: pd.DataFrame, comp_ref: dict, weights: dict) -> pd.DataFrame:
             m = (f["group"] == grp).to_numpy()
             if m.any() and grp in comp_ref[c]:
                 med, mad = comp_ref[c][grp]
-                vals[m] = np.clip((f.loc[m, c].to_numpy(float) - med) / mad, -Z_CAP, Z_CAP)
+                cap = TEAM_Z_CAP if c in TEAM_SHARED else Z_CAP
+                vals[m] = np.clip((f.loc[m, c].to_numpy(float) - med) / mad, -cap, cap)
         z[f"z_{c}"] = vals
     line = f["group"].map(GROUP_LINE)
     score = np.zeros(len(f))
@@ -171,8 +180,17 @@ def rate(f: pd.DataFrame, ref: dict | None = None,
         pool = f[f["minutes_best"] >= REF_MINUTES]
         if len(pool) < 50:
             pool = f
-        comp_ref = {c: {g: _centre_scale(pool.loc[pool["group"] == g, c].to_numpy(float))
-                        for g in GROUPS if (pool["group"] == g).any()} for c in COMPONENTS}
+        line = pool["group"].map(GROUP_LINE)
+        comp_ref = {}
+        for c in COMPONENTS:
+            comp_ref[c] = {}
+            for g in GROUPS:
+                if not (pool["group"] == g).any():
+                    continue
+                med, mad = _centre_scale(pool.loc[pool["group"] == g, c].to_numpy(float))
+                _, line_mad = _centre_scale(
+                    pool.loc[line == GROUP_LINE[g], c].to_numpy(float))
+                comp_ref[c][g] = (med, max(mad, LINE_FLOOR * line_mad))
         z = _scores(pool, comp_ref, weights)
         score_ref = {g: np.sort(z.loc[(pool["group"] == g).to_numpy(), "score"].to_numpy())
                      for g in GROUPS}

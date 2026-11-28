@@ -33,9 +33,9 @@ def without(component: str) -> dict:
 
 
 V2_VARIANTS = {
-    "v2.5": {},
-    "v2.5 no team level": {"weights": without("team_level")},
-    "v2.2 (fee age curve)": {"method": "curve"},
+    "v2.6": {},
+    "v2.6 market prefs": {"prefs": "market"},
+    "v2.6 no team level": {"weights": without("team_level")},
 }
 
 
@@ -61,12 +61,13 @@ def main():
     r1 = fit(prepare_v1(d), verbose=False)
     values = {"v1.5": value_current(d, r1, current_features(d, r1))}
     prep = v2.prepare(d, current_rows(d))
+    print("league factors:", prep["league_factors"])
     for name, kw in V2_VARIANTS.items():
         print(f"training {name} ...", flush=True)
         r = v2.fit(prep, verbose=False, **kw)
         values[name] = r["values"]
         if kw.get("method", "projection") == "projection":
-            print("  ", {k: r["metrics"][k] for k in ("beta", "delta", "fee_rank_corr_train",
+            print("  ", {k: r["metrics"][k] for k in ("beta", "delta", "prefs_rank_corr",
                                                       "fee_rank_corr_test", "fee_mdape_test")})
 
     for name, v in values.items():
@@ -78,7 +79,7 @@ def main():
                             for ln, x in c["by_line"].items()}}
         by_name = unique_names(v).reindex(REFERENCE)
         refs[name] = by_name["p50"].map(eur)
-        if name == "v2.5":
+        if name == "v2.6":
             ratings = by_name[["rating", "age"]].round(1)
     refs["TM value"] = by_name["tm_value"].map(eur)
     refs["rating"], refs["age"] = ratings["rating"], ratings["age"]

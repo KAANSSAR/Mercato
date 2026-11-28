@@ -1,16 +1,17 @@
-"""Global Football Rankings (globalfootballrankings.com): weekly league and club ratings.
+"""Global Football Rankings (globalfootballrankings.com): daily league and club ratings.
 
     uv run python -m mercato.sources.gfr --dry   # scrape, match, compare, print only
     uv run python -m mercato.sources.gfr         # also write a snapshot to Postgres
 
 Reads the two public ranking pages as a visitor sees them (rendered in headless Chromium,
-two page loads a run, once a week), identifying itself. Their robots.txt allows all
+two page loads a run, once a day), identifying itself. Their robots.txt allows all
 crawlers. Ratings are 0 to 100 (50 is the world average). Credit GFR wherever they appear.
 
-They only publish current ratings, so this can't replace Mercato's own Elo for history
-(the model needs ratings on every match date since 2015). Uses: a weekly cross-check of
-our Elo, a league prior for leagues that rarely meet in Europe, and a history of their
-ratings that builds up from the first snapshot.
+They only publish current ratings, so history (every match date since 2015) still comes
+from Mercato's own Elo: mercato.features.gfr_anchor moves each league's level to GFR's,
+across all history, and keeps our match-by-match order within the league. Each run also
+writes data/gfr/leagues.csv and clubs.csv for the model, and the daily snapshots build a
+GFR history of their own from the first one.
 """
 
 import argparse
@@ -232,6 +233,11 @@ def main():
     if tm_clubs is not None and len(miss):
         print(f"\nUnmatched clubs in our countries ({len(miss)}), top 15 by rating:")
         print(miss.head(15)[["rank", "name", "country", "slug", "rating"]].to_string(index=False))
+    # local copy for the model (mercato.features.gfr_anchor), kept current on every run
+    from mercato.features.gfr_anchor import GFR_DIR
+    GFR_DIR.mkdir(parents=True, exist_ok=True)
+    leagues.assign(snapshot=raw["updated"]).to_csv(GFR_DIR / "leagues.csv", index=False)
+    clubs.assign(snapshot=raw["updated"]).to_csv(GFR_DIR / "clubs.csv", index=False)
     compare(leagues, clubs)
     if not args.dry:
         print(save(raw["updated"], leagues, clubs))

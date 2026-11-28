@@ -27,10 +27,13 @@ def season_table(apps: pd.DataFrame, clubs: pd.DataFrame) -> pd.DataFrame:
     leagues = set(clubs["domestic_competition_id"].dropna())
     a = apps[apps["competition_id"].isin(leagues)].copy()
     a["season"] = season_of(a["date"])
+    # match difficulty only, before any league factor (goals_w0 once factors are applied)
+    gw = "goals_w0" if "goals_w0" in a else "goals_w"
+    aw = "assists_w0" if "assists_w0" in a else "assists_w"
     g = a.groupby(["player_id", "season", "competition_id"]).agg(
         minutes=("minutes_played", "sum"), goals=("goals", "sum"),
-        assists=("assists", "sum"), goals_adj=("goals_w", "sum"),
-        assists_adj=("assists_w", "sum")).reset_index()
+        assists=("assists", "sum"), goals_adj=(gw, "sum"),
+        assists_adj=(aw, "sum")).reset_index()
     n90 = g["minutes"] / 90
     g["ga90"] = (g["goals"] + g["assists"]) / n90
     g["ga90_adj"] = (g["goals_adj"] + g["assists_adj"]) / n90
@@ -81,16 +84,41 @@ def attackers(st: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
 
 def league_strength(team_elo: pd.DataFrame, clubs: pd.DataFrame) -> pd.DataFrame:
     """Average current Elo of each league's clubs (the Global Football Rankings and Opta
-    approach to league strength), from Mercato's own Elo."""
-    from mercato.features.elo import latest
-    last = latest(team_elo)
-    last = last[pd.to_datetime(last["date"]) >= pd.to_datetime(last["date"]).max()
-                - pd.Timedelta(days=200)]
-    lg = dict(zip(clubs["club_id"], clubs["domestic_competition_id"]))
-    last["league"] = last["tm_club_id"].map(lg)
-    out = last.dropna(subset=["league"]).groupby("league")["elo"].agg(["mean", "max", "count"])
+    approach to league strength), from Mercato's own Elo. A club counts for the league of
+    its latest league game, so relegated clubs drop out of their old league (v2.5 counted
+    33 Premier League clubs)."""
+    leagues = set(clubs["domestic_competition_id"].dropna())
+    t = team_elo[team_elo["competition_id"].isin(leagues)].copy()
+    t["date"] = pd.to_datetime(t["date"])
+    recent = t[t["date"] >= t["date"].max() - pd.Timedelta(days=200)]
+    last = recent.sort_values(["date", "game_id"]).groupby("tm_club_id").tail(1)
+    out = last.groupby("competition_id")["elo_post"].agg(["mean", "max", "count"])
+    out.index.name = "league"
     return out.round(0).sort_values("mean", ascending=False).rename(
         columns={"mean": "avg_elo", "max": "best_club", "count": "clubs"})
+
+
+def league_factors(apps: pd.DataFrame, clubs: pd.DataFrame, players: pd.DataFrame,
+                   before_season: int | None = None) -> dict:
+    """What a goal or assist in each league is worth next to the top-5 average, after the
+    match difficulty adjustment, from players who moved league (seasons before
+    before_season only, so a backtest never sees the future)."""
+    st = attackers(season_table(apps, clubs), players)
+    if before_season is not None:
+        st = st[st["season"] < before_season]
+    f = factors(st, "ga90_adj")
+    return dict(zip(f["league"], f["factor"]))
+
+
+def apply_league_factors(apps: pd.DataFrame, lf: dict) -> pd.DataFrame:
+    """Scale league goals and assists by the league factor (cups and Europe stay at 1:
+    the match difficulty already prices those). Idempotent: always from goals_w0."""
+    if "goals_w0" not in apps:
+        apps["goals_w0"], apps["assists_w0"] = apps["goals_w"], apps["assists_w"]
+    m = apps["competition_id"].map(lf).fillna(1.0)
+    apps["goals_w"] = apps["goals_w0"] * m
+    apps["assists_w"] = apps["assists_w0"] * m
+    return apps
 
 
 def main():

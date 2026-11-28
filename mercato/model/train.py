@@ -27,6 +27,7 @@ import pandas as pd
 import xgboost as xgb
 
 from mercato.features.elo import run as run_elo
+from mercato.features.gfr_anchor import anchored
 from mercato.model.features import (
     GROUP_LINE,
     LINES,
@@ -96,13 +97,15 @@ class Data:
 
 def load(data_dir: Path = DATA_DIR) -> Data:
     games = read("games", data_dir)
+    clubs = read("clubs", data_dir)
+    team_elo, _ = anchored(run_elo(games), clubs, verbose=True)
     try:
         valuations = read("player_valuations", data_dir)
     except FileNotFoundError:
         valuations = None
-    return Data(players=read("players", data_dir), clubs=read("clubs", data_dir),
+    return Data(players=read("players", data_dir), clubs=clubs,
                 transfers=read("transfers", data_dir), apps=read("appearances", data_dir),
-                team_elo=run_elo(games), valuations=valuations)
+                team_elo=team_elo, valuations=valuations)
 
 
 def _player_info(d: Data) -> pd.DataFrame:
