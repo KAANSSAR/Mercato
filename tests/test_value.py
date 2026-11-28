@@ -108,9 +108,11 @@ def test_bands_and_flags(world):
     assert ((v["p10"] <= v["p50"]) & (v["p50"] <= v["p90"])).all()
     assert (v.loc[v["minutes_best"] < 900, "low_confidence"]).all()
     d0 = v["drivers"].iloc[0]
-    assert set(d0) == {"performance", "age", "position"}
+    assert set(d0) == {"current_level", "projected_years"}
+    assert sum(d0.values()) == pytest.approx(v["p50"].iloc[0], rel=0.01, abs=2e4)
     assert set(v["components"].iloc[0]) == {"output", "impact", "defence", "minutes",
-                                            "opposition", "team_level"}
+                                            "opposition", "team_level", "projected_rating"}
+    assert len(v["components"].iloc[0]["projected_rating"]) == 6
 
 
 def test_weights_sum_to_one():
@@ -149,3 +151,53 @@ def test_rating_separates_the_top():
     f.loc[0, "g90"], f.loc[1, "g90"] = 1.0, 0.6  # Haaland-like, and merely very good
     out, _ = rate(f)
     assert out.loc[0, "score"] > out.loc[1, "score"] + 0.15
+
+
+def test_fee_curve_method_still_runs(world):
+    from mercato.model.value import fit
+    _, _, prep, _ = world
+    r = fit(prep, method="curve", verbose=False)
+    assert set(r["values"]["drivers"].iloc[0]) == {"performance", "age", "position"}
+
+
+def _snaps(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for pid in range(n // 6):
+        age0, s = rng.uniform(18, 30), rng.normal(0, 1)
+        for t in range(6):
+            age = age0 + t
+            s1 = s + rng.normal(0, 0.5)
+            rows.append({"player_id": pid, "year": 2016 + t, "line": "ATT", "age": age,
+                         "score3": s, "score1": s1})
+            s = 0.8 * s - 0.08 * (age - 27) + rng.normal(0, 0.3)  # fades, ages
+    return pd.DataFrame(rows)
+
+
+def test_paths_learn_fading_and_ageing():
+    from mercato.model.projection import fit_paths
+    c = fit_paths(_snaps())["coefs"]["ATT"][1]  # [const, score3, age-27, (age-27)^2]
+    assert 0.5 < c[1] < 1.0     # good seasons partly fade
+    assert c[2] < 0             # older players decline
+
+
+def test_projection_stops_at_retirement_and_values_youth_less_than_a_cliff():
+    from mercato.model.projection import MAX_AGE, fit_paths, log_index, project
+    paths = fit_paths(_snaps())
+    f = pd.DataFrame({"group": ["ST", "ST", "ST"], "age": [22.0, 27.5, 35.0],
+                      "score": [1.0, 1.0, 1.0]})
+    P = project(f, paths)
+    assert np.isnan(P[2, MAX_AGE - 35 + 1:]).all() and not np.isnan(P[2, :3]).any()
+    li = log_index(P, 1.0, 0.8)
+    assert li[0] > li[1] > li[2]
+    # same level at 27.5 keeps a good share of its worth at 22 (no cliff after 26)
+    assert np.exp(li[1] - li[0]) > 0.4
+
+
+def test_dropouts_count_as_weak_seasons():
+    from mercato.model.projection import fit_paths
+    s = _snaps()
+    full = fit_paths(s)["coefs"]["ATT"][3][0]
+    # remove every season after 30: those players "drop out" and pull the path down
+    gone = fit_paths(s[s["age"] < 30])["coefs"]["ATT"][3]
+    assert gone[2] < fit_paths(s)["coefs"]["ATT"][3][2] or gone[0] < full

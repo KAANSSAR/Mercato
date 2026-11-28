@@ -33,9 +33,9 @@ def without(component: str) -> dict:
 
 
 V2_VARIANTS = {
-    "v2.2": {},
-    "v2.2 one price list": {"scale": "rank"},
-    "v2.1 (free curve)": {"scale": "rank", "additive": False},
+    "v2.3": {},
+    "v2.3 no team level": {"weights": without("team_level")},
+    "v2.2 (fee age curve)": {"method": "curve"},
 }
 
 
@@ -63,7 +63,11 @@ def main():
     prep = v2.prepare(d, current_rows(d))
     for name, kw in V2_VARIANTS.items():
         print(f"training {name} ...", flush=True)
-        values[name] = v2.fit(prep, verbose=False, **kw)["values"]
+        r = v2.fit(prep, verbose=False, **kw)
+        values[name] = r["values"]
+        if kw.get("method", "projection") == "projection":
+            print("  ", {k: r["metrics"][k] for k in ("beta", "delta", "fee_rank_corr_train",
+                                                      "fee_rank_corr_test", "fee_mdape_test")})
 
     for name, v in values.items():
         v = v.assign(name=v["player_id"].map(names))
@@ -74,7 +78,7 @@ def main():
                             for ln, x in c["by_line"].items()}}
         by_name = unique_names(v).reindex(REFERENCE)
         refs[name] = by_name["p50"].map(eur)
-        if name == "v2.2":
+        if name == "v2.3":
             ratings = by_name[["rating", "age"]].round(1)
     refs["TM value"] = by_name["tm_value"].map(eur)
     refs["rating"], refs["age"] = ratings["rating"], ratings["age"]
@@ -85,9 +89,13 @@ def main():
     print(pd.DataFrame(refs).to_string())
 
     if args.backtest:
+        rows, _, t0 = v2.backtest_rows(d)
+        print("\npreparing backtest ...", flush=True)
+        bprep = v2.prepare(d, rows, t0)
         for name, kw in V2_VARIANTS.items():
             print(f"\nbacktest {name}:")
-            print(json.dumps(v2.backtest(d, names=names, **kw), indent=2, ensure_ascii=False))
+            print(json.dumps(v2.backtest(d, names=names, prep=bprep, **kw), indent=2,
+                             ensure_ascii=False))
 
 
 if __name__ == "__main__":

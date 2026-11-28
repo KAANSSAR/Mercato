@@ -70,7 +70,8 @@ def team_games(team_elo: pd.DataFrame, hfa: float = EloParams().hfa,
               "elo_pre", "opp_elo_pre"]]
 
 
-def game_features(rows: pd.DataFrame, apps: pd.DataFrame, tg: pd.DataFrame) -> pd.DataFrame:
+def game_features(rows: pd.DataFrame, apps: pd.DataFrame, tg: pd.DataFrame,
+                  recency: tuple = RECENCY) -> pd.DataFrame:
     """Impact, defence, opposition and team level over the three years before each as_of."""
     a = apps[["game_id", "player_id", "player_club_id", "date", "minutes_played"]].merge(
         tg.rename(columns={"tm_club_id": "player_club_id"}), on=["game_id", "player_club_id"],
@@ -97,7 +98,7 @@ def game_features(rows: pd.DataFrame, apps: pd.DataFrame, tg: pd.DataFrame) -> p
         if hi <= lo:
             continue
         k = ((t - d[lo:hi]) // year).astype(int).clip(0, YEARS - 1)
-        w = np.asarray(RECENCY)[k] * mins[s + lo:s + hi]
+        w = np.asarray(recency)[k] * mins[s + lo:s + hi]
         out[i, 0] = w.sum()
         for j, c in enumerate(COMPONENTS[1:3] + COMPONENTS[4:], start=1):
             out[i, j] = (w * cols[c][s + lo:s + hi]).sum()

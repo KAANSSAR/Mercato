@@ -7,9 +7,12 @@
 Three steps:
 
 1. Rating (model.rating): how well he plays for his position, 0 to 100, stats only.
-2. Value curve: what a rating is worth at each age and position, learned from real fees
-   (inflation adjusted). Only rating, age and position go in: no club, league, Europe or
-   buyer, so two players who play the same get the same value wherever they play.
+2. Projection (model.projection, v2.3): his rating over the next six seasons, from how
+   ratings have actually moved with age since 2016, discounted into one index. Fees only
+   tune how much an elite season counts and how much later years count. No club, league,
+   Europe or buyer, so two players who play the same get the same value wherever they
+   play. (v2.0 to v2.2 learned the age effect from fees instead, which over-priced youth
+   and dropped players off a cliff after 26; method="curve" keeps that for comparison.)
 3. Euro scale: Transfermarkt's price list for each line (attack, midfield, defence,
    keepers), measured on regulars. Mercato ranks every player in his line; the defender
    Mercato ranks 20th gets what the 20th most valuable regular defender on Transfermarkt
@@ -33,9 +36,17 @@ import pandas as pd
 import xgboost as xgb
 from scipy.stats import norm, spearmanr
 
-from mercato.model.features import GROUP_LINE, finish, raw_features
+from mercato.model.features import GROUP_LINE, RECENCY, finish, raw_features
 from mercato.model.fee_index import build_index, deflate
-from mercato.model.rating import COMPONENTS, game_features, rate, team_games
+from mercato.model.projection import (
+    ONE_SEASON,
+    fit_paths,
+    fit_preferences,
+    log_index,
+    project,
+    snapshot_rows,
+)
+from mercato.model.rating import COMPONENTS, _pct, game_features, rate, team_games
 from mercato.model.train import (
     MODEL_DIR,
     Data,
@@ -50,7 +61,7 @@ from mercato.model.train import (
 )
 from mercato.sources.tm_datasets import TOP5
 
-VERSION = "v2.2"
+VERSION = "v2.3"
 CURVE_PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 20,
                 "subsample": 0.8, "colsample_bytree": 1.0, "reg_lambda": 5.0,
                 "tree_method": "hist"}
@@ -71,11 +82,17 @@ def _team_games(d: Data) -> pd.DataFrame:
     return d._tg
 
 
-def base_features(d: Data, rows: pd.DataFrame, gm: dict | None = None):
-    """Per-90 output, shares and age (model.features) plus the game features."""
+def base_features(d: Data, rows: pd.DataFrame, gm: dict | None = None,
+                  recency: tuple = RECENCY, raw: pd.DataFrame | None = None):
+    """Per-90 output, shares and age (model.features) plus the game features.
+    recency ONE_SEASON gives that season alone (the projection's targets)."""
     apps, games, elo = d.prepared()
-    f, gm = finish(raw_features(rows, apps, games, elo), gm)
-    f = pd.concat([f, game_features(f, apps, _team_games(d))], axis=1)
+    if raw is None:
+        raw = raw_features(rows, apps, games, elo)
+    f, gm = finish(raw, gm, recency)
+    if tuple(recency) == ONE_SEASON:
+        f["share_best"] = f["share_1y"]
+    f = pd.concat([f, game_features(f, apps, _team_games(d), recency)], axis=1)
     return f, gm
 
 
@@ -115,9 +132,11 @@ def _curve(X, y, X_val=None, y_val=None, rounds=None,
 
 # ---------- fit ----------
 
-def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int = 200) -> dict:
-    """Features for the pool being valued (also the rating's reference) and for every paid
-    move before the cutoff. Computed once, shared by variants."""
+def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int = 200,
+            projection: bool = True) -> dict:
+    """Features for the pool being valued (also the rating's reference), for every paid
+    move before the cutoff and, for the projection, for yearly snapshots of top-5
+    regulars. Computed once, shared by variants."""
     cutoff = pd.Timestamp(cutoff if cutoff is not None else pool_rows["as_of"].max())
     pool, gm = base_features(d, pool_rows)
     rows = training_rows(d)
@@ -128,42 +147,91 @@ def prepare(d: Data, pool_rows: pd.DataFrame, cutoff=None, min_test_moves: int =
     rows["fee_adj"] = deflate(rows["fee"], rows["season"], index, test_season)
     rows["y"] = np.log(rows["fee_adj"])
     moves, _ = base_features(d, rows, gm)
-    return {"pool": pool, "moves": moves, "index": index, "test_season": test_season,
-            "cutoff": cutoff}
+    out = {"pool": pool, "moves": moves, "index": index, "test_season": test_season,
+           "cutoff": cutoff}
+    if projection:
+        snaps = snapshot_rows(d.apps, d.clubs, _player_info(d), cutoff)
+        apps, games, elo = d.prepared()
+        raw = raw_features(snaps, apps, games, elo)
+        out["snap3"], _ = base_features(d, snaps, gm, raw=raw)
+        out["snap1"], _ = base_features(d, snaps, gm, ONE_SEASON, raw=raw)
+    return out
+
+
+def _ols_x(li: np.ndarray, line: np.ndarray) -> np.ndarray:
+    return np.column_stack([li] + [(line == ln).astype(float) for ln in LINE_NAMES])
 
 
 def fit(prep: dict, weights: dict | None = None, scale: str = "rank_line",
-        additive: bool = True, verbose: bool = True) -> dict:
+        additive: bool = True, method: str = "projection", verbose: bool = True) -> dict:
+    """method projection (v2.3): projected performance over six years, discounted.
+    method curve (v2.2): rating and age through a curve learned from fees."""
     assert scale in SCALES, scale
     pool, ref = rate(prep["pool"], None, weights)
     moves, _ = rate(prep["moves"], ref)
     ts = prep["test_season"]
     tr, va, te = (moves["season"] <= ts - 2), (moves["season"] == ts - 1), (moves["season"] == ts)
-    X, y = design(moves), moves["y"].to_numpy()
-
-    m_tr, best = _curve(X[tr], y[tr], X[va], y[va], additive=additive)
-    band = residual_band(y[va], m_tr.predict(X[va]))
-    m_eval, _ = _curve(X[tr | va], y[tr | va], rounds=best, additive=additive)
-    rule = age_decline(moves[tr | va])
-    log_te = m_eval.predict(X[te]) + rule[1] * np.clip(moves.loc[te, "age"] - rule[0], 0, None)
+    y = moves["y"].to_numpy()
     actual = moves.loc[te, "fee_adj"].to_numpy()
-    model, _ = _curve(X, y, rounds=best, additive=additive)
-    rule = age_decline(moves)
+    result = {"ref": ref, "scale_mode": scale, "method": method,
+              "cap": float(moves["fee_adj"].max()), "weights": ref["weights"]}
+    metrics = {"moves": len(moves), "test_season": ts}
 
-    result = {"model": model, "ref": ref, "band": band, "age_rule": rule, "scale_mode": scale,
-              "cap": float(moves["fee_adj"].max()), "weights": ref["weights"],
-              "metrics": {
-                  "moves": len(moves), "test_season": ts, "rounds": best,
-                  # for reference only: v2 values players, it doesn't predict fees
-                  "fee_mdape_test": mdape(np.exp(log_te), actual),
-                  "naive_fee_mdape": mdape(np.full(len(actual), np.exp(np.median(y[tr | va]))),
-                                           actual),
-                  "age_support": rule[0],
-                  "age_decline_per_year": round(float(np.exp(rule[1]) - 1), 3)}}
+    if method == "projection":
+        s3, _ = rate(prep["snap3"], ref)
+        s1, _ = rate(prep["snap1"], ref)
+        snaps = pd.DataFrame({"player_id": s3["player_id"], "year": s3["year"],
+                              "line": s3["group"].map(GROUP_LINE), "age": s3["age"],
+                              "score3": s3["score"], "score1": s1["score"].to_numpy()})
+        paths = fit_paths(snaps)
+        P = project(moves, paths)
+        line = moves["group"].map(GROUP_LINE).to_numpy()
+        trva = (tr | va).to_numpy()
+        beta, delta, rho = fit_preferences(P[trva], line[trva], y[trva])
+        li = log_index(P, beta, delta)
+        X = _ols_x(li, line)
+        c_tr = np.linalg.lstsq(X[tr], y[tr], rcond=None)[0]
+        band = residual_band(y[va], X[va] @ c_tr)
+        c_eval = np.linalg.lstsq(X[trva], y[trva], rcond=None)[0]
+        log_te = X[te] @ c_eval
+        coef = np.linalg.lstsq(X, y, rcond=None)[0]
+        result |= {"paths": paths, "beta": beta, "delta": delta, "ols": coef}
+        metrics |= {"snapshots": len(snaps), "beta": beta, "delta": delta,
+                    "fee_rank_corr_train": round(rho, 3),
+                    "fee_rank_corr_test": round(float(spearmanr(li[te], y[te])[0]), 3)}
+    else:
+        X = design(moves)
+        m_tr, best = _curve(X[tr], y[tr], X[va], y[va], additive=additive)
+        band = residual_band(y[va], m_tr.predict(X[va]))
+        m_eval, _ = _curve(X[tr | va], y[tr | va], rounds=best, additive=additive)
+        rule = age_decline(moves[tr | va])
+        log_te = (m_eval.predict(X[te])
+                  + rule[1] * np.clip(moves.loc[te, "age"] - rule[0], 0, None))
+        model, _ = _curve(X, y, rounds=best, additive=additive)
+        result |= {"model": model, "age_rule": age_decline(moves)}
+        metrics["rounds"] = best
+
+    result["band"] = band
+    # for reference only: v2 values players, it doesn't predict fees
+    metrics |= {"fee_mdape_test": mdape(np.exp(log_te), actual),
+                "naive_fee_mdape": mdape(np.full(len(actual), np.exp(np.median(y[tr | va]))),
+                                         actual)}
+    result["metrics"] = metrics
     result["values"] = value(pool, result)
     if verbose:
-        print(json.dumps(result["metrics"], indent=2))
+        print(json.dumps(metrics, indent=2, default=float))
     return result
+
+
+def raw_value(f: pd.DataFrame, result: dict) -> tuple[np.ndarray, np.ndarray | None]:
+    """Log raw value before the euro scale, and the projected path (projection only)."""
+    if result["method"] == "projection":
+        P = project(f, result["paths"])
+        li = log_index(P, result["beta"], result["delta"])
+        return _ols_x(li, f["group"].map(GROUP_LINE).to_numpy()) @ result["ols"], P
+    support, slope = result["age_rule"]
+    return (result["model"].predict(design(f))
+            + slope * np.clip(f["age"].to_numpy(float) - support, 0, None)), None
 
 
 def regulars(v: pd.DataFrame) -> pd.Series:
@@ -172,11 +240,8 @@ def regulars(v: pd.DataFrame) -> pd.Series:
 
 
 def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
-    """Raw value from the curve, then the market-wide euro scale."""
-    X = design(pool)
-    support, slope = result["age_rule"]
-    log_raw = (result["model"].predict(X)
-               + slope * np.clip(pool["age"].to_numpy(float) - support, 0, None))
+    """Raw value, then the euro scale."""
+    log_raw, P = raw_value(pool, result)
     v = pool[["player_id", "group", "age", "minutes_best", "minutes_1y", "tm_value", "rating",
               "score"] + [f"z_{c}" for c in COMPONENTS]].copy()
     v["line"] = v["group"].map(GROUP_LINE)
@@ -203,9 +268,30 @@ def value(pool: pd.DataFrame, result: dict) -> pd.DataFrame:
     v[["p10", "p50", "p90"]] = v[["p10", "p50", "p90"]].clip(upper=cap)
     v["low_confidence"] = v["capped"] | (v["minutes_best"] < LOW_MINUTES)
     v["gap"] = v["p50"] / v["tm_value"] - 1
-    v["drivers"] = drivers(result["model"], X, v["p50"], slope)
     v["components"] = [{c: round(float(norm.cdf(r[f"z_{c}"]) * 100), 1) for c in COMPONENTS}
                        for _, r in v.iterrows()]
+    if P is None:
+        v["drivers"] = drivers(result["model"], design(pool), v["p50"], slope)
+    else:
+        # now vs later: the share of the value index from this season's level
+        disc = result["delta"] ** np.arange(P.shape[1])
+        terms = np.where(np.isnan(P), 0.0, disc * np.exp(result["beta"] * np.nan_to_num(P)))
+        now = terms[:, 0] / terms.sum(axis=1)
+        v["drivers"] = [{"current_level": float(round(p * n, -4)),
+                         "projected_years": float(round(p * (1 - n), -4))}
+                        for p, n in zip(v["p50"], now)]
+        ref = result["ref"]["score"]
+        groups = v["group"].to_numpy()
+        proj = np.full(P.shape, np.nan)
+        for g in set(groups):
+            m = groups == g
+            proj[m] = 100 * _pct(ref.get(g, np.array([])),
+                                 np.nan_to_num(P[m]).ravel()).reshape(P[m].shape)
+        proj[np.isnan(P)] = np.nan
+        for comp, row in zip(v["components"], proj):
+            comp["projected_rating"] = [None if np.isnan(x) else round(float(x), 1)
+                                        for x in row[1:]]
+        v["projected_peak"] = np.nanmax(proj, axis=1)
     return v
 
 
@@ -300,16 +386,16 @@ def backtest_rows(d: Data, horizon_days: int = 365):
 
 
 def backtest(d: Data, weights: dict | None = None, scale: str = "rank_line",
-             additive: bool = True,
+             additive: bool = True, method: str = "projection",
              horizon_days: int = 365, min_test_moves: int = 200,
-             names: dict | None = None) -> dict:
+             names: dict | None = None, prep: dict | None = None) -> dict:
     """Value everyone as of a year ago with only what was known then (fees before then,
     stats before then, Transfermarkt's scale then), and see how Transfermarkt moved.
     Both the gap and the move are compared within the same line and age band, since young
     players rise anyway and that isn't skill."""
     rows, later, t0 = backtest_rows(d, horizon_days)
-    prep = prepare(d, rows, t0, min_test_moves)
-    v = fit(prep, weights, scale, additive, verbose=False)["values"]
+    prep = prep or prepare(d, rows, t0, min_test_moves)
+    v = fit(prep, weights, scale, additive, method, verbose=False)["values"]
     v["tm_later"] = v["player_id"].map(later)
     v = v[regulars(v) & ~v["low_confidence"] & (v["tm_later"] > 0)].copy()
     v["gap0"] = np.log(v["p50"] / v["tm_value"])
@@ -343,10 +429,19 @@ def save(result: dict, values: pd.DataFrame) -> dict:
 
     out = MODEL_DIR / VERSION
     out.mkdir(parents=True, exist_ok=True)
-    result["model"].save_model(out / "curve.json")
     ref = result["ref"]
+    if result["method"] == "curve":
+        result["model"].save_model(out / "curve.json")
+        method = {"age_rule": result["age_rule"]}
+    else:
+        method = {"beta": result["beta"], "delta": result["delta"],
+                  "ols": list(map(float, result["ols"])),
+                  "paths": {ln: {k: list(map(float, c)) for k, c in by.items()}
+                            for ln, by in result["paths"]["coefs"].items()},
+                  "dropout": result["paths"]["dropout"]}
     (out / "meta.json").write_text(json.dumps({
-        "weights": ref["weights"], "band": result["band"], "age_rule": result["age_rule"],
+        "method": result["method"], **method,
+        "weights": ref["weights"], "band": result["band"],
         "scale": result["scale_mode"], "cap": result["cap"], "metrics": result["metrics"],
         "reference": {"components": {c: {g: list(map(float, a)) for g, a in by.items()}
                                      for c, by in ref["components"].items()},

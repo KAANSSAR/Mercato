@@ -127,13 +127,14 @@ def raw_features(rows: pd.DataFrame, apps: pd.DataFrame, games: pd.DataFrame,
     return feats
 
 
-def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.DataFrame, dict]:
+def finish(feats: pd.DataFrame, group_means: dict | None = None,
+           recency: tuple = RECENCY) -> tuple[pd.DataFrame, dict]:
     """Per 90 with shrinkage towards the position average, age, encodings.
     group_means from training are reused at prediction time."""
     f = feats.copy()
     # recency-weighted output over three seasons: an injured year neither erases a player
     # nor lets an old peak dominate
-    w = RECENCY
+    w = recency
     mins = sum(w[k] * f[f"minutes_y{k}"] for k in range(YEARS)).clip(lower=0)
     goals = sum(w[k] * f[f"goals_y{k}"] for k in range(YEARS))
     assists = sum(w[k] * f[f"assists_y{k}"] for k in range(YEARS))
