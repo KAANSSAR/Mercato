@@ -140,7 +140,7 @@ def _row(trained):
     d, _, r = trained
     f, _ = features_for(current_rows(d).head(1), d, r["group_means"])
     f["year"] = r["level"]
-    return design_matrix(f)[r["columns"]], r
+    return design_matrix(f, r["numeric"])[r["columns"]], r
 
 
 def test_value_never_rises_past_peak_age(trained):
@@ -236,3 +236,16 @@ def test_compare_handles_repeated_names():
                       "p50": [4e6, 60e6, 150e6]})
     out = unique_names(v)
     assert out.loc["Rodri", "p50"] == 60e6 and len(out) == 2
+
+
+def test_low_confidence_flags_extrapolation(trained):
+    from mercato.model.train import predict
+    X, r = _row(trained)
+    normal = predict(r["model"], X, r["band"], cap=r["cap"], dense_max=r["dense_max"])
+    x = X.copy()
+    x[["g90", "a90", "ga90"]] = 5.0
+    x["club_elo"] = 2400.0
+    wild = predict(r["model"], x, r["band"], cap=r["cap"], dense_max=1.0)
+    assert not normal["low_confidence"].iloc[0] or normal["p50"].iloc[0] > r["dense_max"]
+    assert wild["low_confidence"].iloc[0]
+    assert r["dense_max"] < r["cap"]

@@ -28,6 +28,7 @@ import xgboost as xgb
 
 from mercato.features.elo import run as run_elo
 from mercato.model.features import (
+    NUMERIC_EURO,
     additive_platform,
     design_matrix,
     finish,
@@ -46,8 +47,9 @@ from mercato.sources.tm_datasets import (
     read,
 )
 
-VERSION = "v1.4"
+VERSION = "v1.5"
 BAND = (0.10, 0.90)  # P10 to P90
+DENSE_QUANTILE = 0.98  # above this share of real fees, training data is too thin to trust
 MIN_AGE_SUPPORT = 30  # transfers needed at or above an age to trust the model there
 # Past that age, value falls at least this much a year. The fee data alone shows only
 # about 5% because of selection: only good older players get sold for a fee at all.
@@ -56,7 +58,7 @@ MIN_TRAIN_FEE = 500_000
 FIRST_TRAIN_SEASON = 2015
 MODEL_DIR = Path("data/models")
 # Regularised so the few huge fees don't drag the top end (v1.2 put Morgan Rogers at €268m)
-PARAMS = {"max_depth": 3, "learning_rate": 0.03, "min_child_weight": 25, "subsample": 0.8,
+PARAMS = {"max_depth": 2, "learning_rate": 0.03, "min_child_weight": 25, "subsample": 0.8,
           "colsample_bytree": 0.8, "reg_lambda": 5.0, "gamma": 0.05, "tree_method": "hist"}
 
 
@@ -150,7 +152,8 @@ def age_decline(f: pd.DataFrame) -> tuple[float, float]:
 
 
 def predict(model, X: pd.DataFrame, band: tuple[float, float], ages=None,
-            age_rule: tuple[float, float] | None = None, cap: float | None = None) -> pd.DataFrame:
+            age_rule: tuple[float, float] | None = None, cap: float | None = None,
+            dense_max: float | None = None) -> pd.DataFrame:
     """P50 from the model, P10 and P90 from the conformal band, then the age decline past
     the supported ages and the cap at the highest inflation-adjusted fee ever paid
     (v1 put Lamine Yamal at €602m)."""
@@ -160,9 +163,15 @@ def predict(model, X: pd.DataFrame, band: tuple[float, float], ages=None,
         log_p50 = log_p50 + slope * np.clip(np.asarray(ages, dtype=float) - support, 0, None)
     out = pd.DataFrame({"p10": np.exp(log_p50 + band[0]), "p50": np.exp(log_p50),
                         "p90": np.exp(log_p50 + band[1])}, index=X.index)
+    out["capped"] = False
     if cap is not None:
         out["capped"] = out["p50"] > cap
         out[["p10", "p50", "p90"]] = out[["p10", "p50", "p90"]].clip(upper=cap)
+    # beyond the dense part of the training data the model is extrapolating: show the
+    # range and a label, keep the player out of the under/overvalued rankings
+    out["low_confidence"] = out["capped"]
+    if dense_max is not None:
+        out["low_confidence"] |= out["p50"] > dense_max
     return out
 
 
@@ -210,8 +219,10 @@ def prepare(d: Data, min_test_moves: int = 200) -> dict:
             "f_tr": f_tr, "f_va": f_va, "f_te": f_te, "gm": gm}
 
 
-def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = None,
-        additive: bool = False, verbose: bool = True) -> dict:
+def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = NUMERIC_EURO,
+        additive: bool = True, verbose: bool = True) -> dict:
+    """Defaults are v1.5 (variant C in model.compare): Europe as one feature, depth-2
+    trees, talent features interact while platform features only add."""
     f_tr, f_va, f_te = prep["f_tr"], prep["f_va"], prep["f_te"]
     index, level = prep["index"], prep["level"]
     X_tr, X_va, X_te = (design_matrix(f, numeric) for f in (f_tr, f_va, f_te))
@@ -242,11 +253,14 @@ def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = None
     allf = pd.concat([f_tr, f_va, f_te], ignore_index=True)
     final, _ = fit_median(design_matrix(allf, numeric), allf["y"].to_numpy(), rounds=best, **kw)
     cap = float(prep["rows"]["fee_adj"].max())
+    dense_max = float(prep["rows"]["fee_adj"].quantile(DENSE_QUANTILE))
     metrics["cap_eur"] = round(cap)
+    metrics["low_confidence_above_eur"] = round(dense_max)
     if verbose:
         print(json.dumps({k: v for k, v in metrics.items() if k != "fee_index"}, indent=2))
     return {"model": final, "group_means": prep["gm"], "metrics": metrics, "level": level,
-            "columns": list(X_tr.columns), "cap": cap, "band": band, "age_rule": rule,
+            "columns": list(X_tr.columns), "cap": cap, "dense_max": dense_max,
+            "band": band, "age_rule": rule,
             "numeric": numeric, "params": params, "additive": additive}
 
 
@@ -277,7 +291,7 @@ def value_current(d: Data, result: dict, f: pd.DataFrame | None = None) -> pd.Da
     f = current_features(d, result) if f is None else f
     X = design_matrix(f, result.get("numeric"))[result["columns"]]
     p = predict(result["model"], X, result["band"], f["age"], result["age_rule"],
-                cap=result["cap"])
+                cap=result["cap"], dense_max=result.get("dense_max"))
     out = pd.concat([f[["player_id", "minutes_1y", "minutes_best", "tm_value", "group",
                         "age"]], p], axis=1)
     out["drivers"] = drivers(result["model"], X, p["p50"])
@@ -295,7 +309,8 @@ def save(result: dict, values: pd.DataFrame) -> dict:
     result["model"].save_model(out / "p50.json")
     (out / "meta.json").write_text(json.dumps(
         {"columns": result["columns"], "group_means": result["group_means"],
-         "level": result["level"], "cap": result["cap"], "band": result["band"],
+         "level": result["level"], "cap": result["cap"], "dense_max": result["dense_max"],
+         "numeric": result["numeric"], "additive": result["additive"], "band": result["band"],
          "age_rule": result["age_rule"], "metrics": result["metrics"]},
         indent=2, default=str))
 
@@ -306,10 +321,12 @@ def save(result: dict, values: pd.DataFrame) -> dict:
         cur.execute("select tm_player_id, mercato_id from id_map where tm_player_id is not null")
         mid = dict(cur.fetchall())
         rows = [(run_id, mid[int(r.player_id)], float(r.p10), float(r.p50), float(r.p90),
-                 Jsonb(r.drivers)) for r in values.itertuples() if int(r.player_id) in mid]
+                 Jsonb(r.drivers), bool(r.capped), bool(r.low_confidence))
+                for r in values.itertuples() if int(r.player_id) in mid]
         with conn.pipeline():
             cur.executemany("insert into valuations (model_run_id, mercato_id, p10_eur, p50_eur, "
-                            "p90_eur, shap) values (%s, %s, %s, %s, %s, %s)", rows)
+                            "p90_eur, shap, capped, low_confidence) "
+                            "values (%s, %s, %s, %s, %s, %s, %s, %s)", rows)
         conn.commit()
     return {"model_run_id": run_id, "valuations": len(rows), "saved_to": str(out)}
 
@@ -331,7 +348,11 @@ def main():
 
 def report(d: Data, values: pd.DataFrame) -> None:
     names = dict(zip(d.players["player_id"], d.players["name"]))
-    regulars = values[(values["minutes_best"] >= 1500) & (values["tm_value"] >= 5e6)].copy()
+    low = values[values["low_confidence"]].assign(name=lambda x: x["player_id"].map(names))
+    print(f"\nLow confidence (outside the model's data, kept out of rankings): {len(low)}: "
+          + ", ".join(low.sort_values("p50", ascending=False)["name"].head(12)))
+    regulars = values[(values["minutes_best"] >= 1500) & (values["tm_value"] >= 5e6)
+                      & ~values["low_confidence"]].copy()
     regulars["name"] = regulars["player_id"].map(names)
     cols = ["name", "group", "age", "p10", "p50", "p90", "tm_value", "gap"]
     fmt = {"age": "{:.0f}".format, "gap": "{:+.0%}".format,

@@ -8,19 +8,18 @@ P50 for a fixed set of reference players under each variant. Writes nothing.
 
 import pandas as pd
 
-from mercato.model.features import NUMERIC_EURO
+from mercato.model.features import NUMERIC, NUMERIC_EURO
 from mercato.model.train import PARAMS, current_features, fit, load, prepare, value_current
 
 REFERENCE = ["Morgan Rogers", "Cole Palmer", "Florian Wirtz", "Bukayo Saka", "Erling Haaland",
              "Lamine Yamal", "Kylian Mbappé", "Hugo Ekitiké", "Ryan Gravenberch", "Declan Rice"]
 
 VARIANTS = {
-    "A v1.4": {},
-    "B euro+depth2": {"numeric": NUMERIC_EURO, "params": PARAMS | {"max_depth": 2}},
-    "C B+additive": {"numeric": NUMERIC_EURO, "params": PARAMS | {"max_depth": 2},
-                     "additive": True},
-    "D B+leaf50": {"numeric": NUMERIC_EURO,
-                   "params": PARAMS | {"max_depth": 2, "min_child_weight": 50}},
+    "A v1.4": {"numeric": NUMERIC, "params": PARAMS | {"max_depth": 3}, "additive": False},
+    "B euro+depth2": {"numeric": NUMERIC_EURO, "params": PARAMS, "additive": False},
+    "C v1.5 (B+additive)": {"numeric": NUMERIC_EURO, "params": PARAMS, "additive": True},
+    "D B+leaf50": {"numeric": NUMERIC_EURO, "params": PARAMS | {"min_child_weight": 50},
+                   "additive": False},
 }
 
 
