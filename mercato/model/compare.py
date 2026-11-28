@@ -24,6 +24,12 @@ VARIANTS = {
 }
 
 
+def unique_names(v: pd.DataFrame) -> pd.DataFrame:
+    """Names repeat across players (two Rodris, several Danilos): keep the most valuable."""
+    return (v.sort_values("tm_value", ascending=False, na_position="last")
+             .drop_duplicates("name").set_index("name"))
+
+
 def main():
     d = load()
     prep = prepare(d)
@@ -45,9 +51,10 @@ def main():
             "at_cap": int(v["capped"].sum()),
             "median_gap_vs_tm": f"{(regulars['p50'] / regulars['tm_value']).median() - 1:+.0%}",
         }
-        refs[name] = v.set_index("name").reindex(REFERENCE)["p50"].map(
+        by_name = unique_names(v)
+        refs[name] = by_name.reindex(REFERENCE)["p50"].map(
             lambda x: f"€{x / 1e6:.0f}m" if pd.notna(x) else "-")
-    refs["TM value"] = v.set_index("name").reindex(REFERENCE)["tm_value"].map(
+    refs["TM value"] = by_name.reindex(REFERENCE)["tm_value"].map(
         lambda x: f"€{x / 1e6:.0f}m" if pd.notna(x) else "-")
     pd.set_option("display.width", 200)
     print(f"\ntest season {prep['test_season']}, naive median error "

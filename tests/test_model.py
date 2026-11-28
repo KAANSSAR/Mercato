@@ -226,3 +226,13 @@ def test_volume_is_capped():
     out, _ = finish(pd.DataFrame(base))
     assert out["top5_share_2y"].tolist() == [1.0, 1.0]
     assert out["ucl_share_2y"].tolist() == [1.0, 1.0]
+
+
+def test_compare_handles_repeated_names():
+    import pandas as pd
+
+    from mercato.model.compare import unique_names
+    v = pd.DataFrame({"name": ["Rodri", "Rodri", "Saka"], "tm_value": [5e6, 50e6, 110e6],
+                      "p50": [4e6, 60e6, 150e6]})
+    out = unique_names(v)
+    assert out.loc["Rodri", "p50"] == 60e6 and len(out) == 2
