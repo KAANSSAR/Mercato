@@ -33,8 +33,8 @@ def without(component: str) -> dict:
 
 
 V2_VARIANTS = {
-    "v2.4": {},
-    "v2.4 no team level": {"weights": without("team_level")},
+    "v2.5": {},
+    "v2.5 no team level": {"weights": without("team_level")},
     "v2.2 (fee age curve)": {"method": "curve"},
 }
 
@@ -78,7 +78,7 @@ def main():
                             for ln, x in c["by_line"].items()}}
         by_name = unique_names(v).reindex(REFERENCE)
         refs[name] = by_name["p50"].map(eur)
-        if name == "v2.4":
+        if name == "v2.5":
             ratings = by_name[["rating", "age"]].round(1)
     refs["TM value"] = by_name["tm_value"].map(eur)
     refs["rating"], refs["age"] = ratings["rating"], ratings["age"]

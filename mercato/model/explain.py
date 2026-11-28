@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from mercato.model import value as v2
+from mercato.model.leagues import season_table
 from mercato.model.projection import project
 from mercato.model.rating import COMPONENTS, rate
 from mercato.model.train import current_rows, load
@@ -28,6 +29,7 @@ def main(names: list[str]):
     pool, _ = rate(prep["pool"], result["ref"])
     values = result["values"].set_index("player_id")
     paths = project(pool, result["paths"])
+    seasons = season_table(d.prepared()[0], d.clubs)
     for name in names:
         pid = by_name.get(name)
         idx = pool.index[pool["player_id"] == pid]
@@ -53,6 +55,12 @@ def main(names: list[str]):
         print("  projected score by season: "
               + ", ".join("-" if np.isnan(x) else f"{x:+.2f}" for x in path[:10]))
         print(f"  drivers: {v['drivers']}")
+        st = seasons[seasons["player_id"] == pid].sort_values("season").tail(6)
+        if len(st):
+            print("  league seasons: season league minutes goals assists  per90  adjusted")
+            for x in st.itertuples():
+                print(f"    {x.season}/{(x.season + 1) % 100:02d} {x.league:<5} {x.minutes:>7.0f} "
+                      f"{x.goals:>5.0f} {x.assists:>7.0f} {x.ga90:>6.2f} {x.ga90_adj:>9.2f}")
 
 
 if __name__ == "__main__":

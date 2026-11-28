@@ -50,15 +50,48 @@ TALENT = ["age_under_peak", "age_over_peak", "g90", "a90", "ga90", "ga90_pct", "
           "a90_pct"]
 
 
-def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame) -> pd.DataFrame:
-    """Attach opponent Elo and a per-appearance weight."""
+def match_difficulty(team_elo: pd.DataFrame, hfa: float = 65.0, bins: int = 30):
+    """Goals a team scores on average at each Elo gap (own minus opponent, home advantage
+    included), relative to the average game. Fitted on every game in the dataset.
+    Returns a function from gap to the multiplier."""
+    t = team_elo.dropna(subset=["goals_for"])
+    gap = (t["elo_pre"] - t["opp_elo_pre"] + np.where(t["is_home"], hfa, -hfa)).to_numpy()
+    goals = t["goals_for"].to_numpy(dtype=float)
+    edges = np.unique(np.quantile(gap, np.linspace(0, 1, bins + 1)))
+    which = np.clip(np.searchsorted(edges, gap, side="right") - 1, 0, len(edges) - 2)
+    centres = pd.Series(gap).groupby(which).mean().to_numpy()
+    means = pd.Series(goals).groupby(which).mean().to_numpy()
+    means = np.maximum.accumulate(means)  # more dominant never means fewer goals
+    base = goals.mean()
+
+    def f(g):
+        return np.clip(np.interp(np.asarray(g, dtype=float), centres, means) / base,
+                       DIFFICULTY_CLIP[0], DIFFICULTY_CLIP[1])
+    return f
+
+
+DIFFICULTY_CLIP = (0.3, 3.0)
+
+
+def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame,
+                        hfa: float = 65.0) -> pd.DataFrame:
+    """Attach the match's Elo gap and divide each goal and assist by how many goals that
+    match should produce. A goal in a mismatch (Sporting at home to a relegation side)
+    counts for less than one in an even game. This is the league factor and the dominant
+    team factor in one, fitted from data. v1 to v2.4 only weighted by the opponent's Elo
+    with an unfitted placeholder, worth about 12% between a Portuguese and a Premier
+    League opponent, while Gyokeres' output fell about 60% from Sporting to Arsenal."""
     a = apps[["game_id", "player_id", "player_club_id", "date", "competition_id",
               "goals", "assists", "minutes_played"]].copy()
     a["date"] = pd.to_datetime(a["date"])
-    opp = team_elo[["game_id", "tm_club_id", "opp_elo_pre"]].rename(
-        columns={"tm_club_id": "player_club_id"})
+    cols = ["game_id", "tm_club_id", "opp_elo_pre", "elo_pre", "is_home"]
+    opp = team_elo[cols].rename(columns={"tm_club_id": "player_club_id"})
     a = a.merge(opp, on=["game_id", "player_club_id"], how="left")
-    a["w"] = (a["opp_elo_pre"].fillna(ELO_BASE) / ELO_BASE) ** ALPHA
+    if "goals_for" in team_elo:
+        gap = a["elo_pre"] - a["opp_elo_pre"] + np.where(a["is_home"].fillna(False), hfa, -hfa)
+        a["w"] = 1.0 / pd.Series(match_difficulty(team_elo, hfa)(gap.fillna(0)), index=a.index)
+    else:  # old Elo tables without goals: the opponent weight
+        a["w"] = (a["opp_elo_pre"].fillna(ELO_BASE) / ELO_BASE) ** ALPHA
     a["goals_w"] = a["goals"].fillna(0) * a["w"]
     a["assists_w"] = a["assists"].fillna(0) * a["w"]
     a["minutes_played"] = a["minutes_played"].fillna(0)
