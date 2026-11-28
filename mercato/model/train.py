@@ -27,8 +27,8 @@ import pandas as pd
 import xgboost as xgb
 
 from mercato.features.elo import run as run_elo
-from mercato.model.features import club_games as club_games_table
 from mercato.model.features import (
+    additive_platform,
     design_matrix,
     finish,
     latest_elo,
@@ -36,6 +36,7 @@ from mercato.model.features import (
     prepare_appearances,
     raw_features,
 )
+from mercato.model.features import club_games as club_games_table
 from mercato.model.fee_index import build_index, deflate, season_of
 from mercato.sources.tm_datasets import (
     DATA_DIR,
@@ -113,12 +114,15 @@ def features_for(rows: pd.DataFrame, d: Data, group_means: dict | None = None):
 
 
 def fit_median(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
-               rounds: int | None = None) -> tuple[xgb.XGBRegressor, int]:
+               rounds: int | None = None, params: dict | None = None,
+               additive: bool = False) -> tuple[xgb.XGBRegressor, int]:
     """Median (P50) model on log fees."""
+    extra = {"interaction_constraints": additive_platform(list(X.columns))} if additive else {}
     m = xgb.XGBRegressor(objective="reg:quantileerror", quantile_alpha=0.5,
                          n_estimators=rounds or 3000,
                          monotone_constraints=monotone_constraints(list(X.columns)),
-                         early_stopping_rounds=100 if X_val is not None else None, **PARAMS)
+                         early_stopping_rounds=100 if X_val is not None else None,
+                         **(params or PARAMS), **extra)
     if X_val is not None:
         m.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
         return m, int(m.best_iteration) + 1
@@ -187,7 +191,8 @@ def mdape(pred, actual) -> float:
     return float(np.median(np.abs(np.asarray(pred) / np.asarray(actual) - 1)))
 
 
-def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
+def prepare(d: Data, min_test_moves: int = 200) -> dict:
+    """Training set, fee index, time split and features: computed once, reused by variants."""
     rows = training_rows(d)
     index = build_index(rows[["season", "fee"]])
     counts = rows["season"].value_counts()
@@ -196,27 +201,35 @@ def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
     val_season, level = test_season - 1, test_season
     rows["fee_adj"] = deflate(rows["fee"], rows["season"], index, level)
     rows["y"] = np.log(rows["fee_adj"])
-
     tr, va, te = (rows["season"] <= val_season - 1), (rows["season"] == val_season), \
                  (rows["season"] == test_season)
     f_tr, gm = features_for(rows[tr], d)
     f_va, _ = features_for(rows[va], d, gm)
     f_te, _ = features_for(rows[te], d, gm)
-    X_tr, X_va, X_te = design_matrix(f_tr), design_matrix(f_va), design_matrix(f_te)
+    return {"rows": rows, "index": index, "level": level, "test_season": test_season,
+            "f_tr": f_tr, "f_va": f_va, "f_te": f_te, "gm": gm}
+
+
+def fit(prep: dict, params: dict | None = None, numeric: list[str] | None = None,
+        additive: bool = False, verbose: bool = True) -> dict:
+    f_tr, f_va, f_te = prep["f_tr"], prep["f_va"], prep["f_te"]
+    index, level = prep["index"], prep["level"]
+    X_tr, X_va, X_te = (design_matrix(f, numeric) for f in (f_tr, f_va, f_te))
+    kw = {"params": params, "additive": additive}
 
     # tune rounds on the validation season, and take the band from its residuals
-    m_tr, best = fit_median(X_tr, f_tr["y"].to_numpy(), X_va, f_va["y"].to_numpy())
+    m_tr, best = fit_median(X_tr, f_tr["y"].to_numpy(), X_va, f_va["y"].to_numpy(), **kw)
     band = residual_band(f_va["y"].to_numpy(), m_tr.predict(X_va))
     trva = pd.concat([f_tr, f_va], ignore_index=True)
     rule = age_decline(trva)
-    m_eval, _ = fit_median(design_matrix(trva), trva["y"].to_numpy(), rounds=best)
+    m_eval, _ = fit_median(design_matrix(trva, numeric), trva["y"].to_numpy(), rounds=best, **kw)
     p_te = predict(m_eval, X_te, band, f_te["age"], rule)
     actual = f_te["fee_adj"].to_numpy()
     tm_ok = f_te["tm_value"].notna() & (f_te["tm_value"] > 0)
     tm_adj = deflate(f_te["tm_value"], f_te["season"], index, level)
     metrics = {
-        "train": int(tr.sum()), "val": int(va.sum()), "test": int(te.sum()),
-        "test_season": test_season, "rounds": best,
+        "train": len(f_tr), "val": len(f_va), "test": len(f_te),
+        "test_season": prep["test_season"], "rounds": best,
         "test_mdape": mdape(p_te["p50"], actual),
         "test_coverage_p10_p90": float(((actual >= p_te["p10"]) & (actual <= p_te["p90"])).mean()),
         "band_multipliers": [round(float(np.exp(b)), 2) for b in band],
@@ -227,13 +240,18 @@ def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
     }
 
     allf = pd.concat([f_tr, f_va, f_te], ignore_index=True)
-    final, _ = fit_median(design_matrix(allf), allf["y"].to_numpy(), rounds=best)
-    cap = float(rows["fee_adj"].max())
+    final, _ = fit_median(design_matrix(allf, numeric), allf["y"].to_numpy(), rounds=best, **kw)
+    cap = float(prep["rows"]["fee_adj"].max())
     metrics["cap_eur"] = round(cap)
     if verbose:
         print(json.dumps({k: v for k, v in metrics.items() if k != "fee_index"}, indent=2))
-    return {"model": final, "group_means": gm, "metrics": metrics, "level": level,
-            "columns": list(X_tr.columns), "cap": cap, "band": band, "age_rule": rule}
+    return {"model": final, "group_means": prep["gm"], "metrics": metrics, "level": level,
+            "columns": list(X_tr.columns), "cap": cap, "band": band, "age_rule": rule,
+            "numeric": numeric, "params": params, "additive": additive}
+
+
+def train(d: Data, verbose: bool = True, min_test_moves: int = 200, **variant) -> dict:
+    return fit(prepare(d, min_test_moves), verbose=verbose, **variant)
 
 
 def current_rows(d: Data) -> pd.DataFrame:
@@ -249,11 +267,15 @@ def current_rows(d: Data) -> pd.DataFrame:
     return rows.dropna(subset=["birth", "group"]).reset_index(drop=True)
 
 
-def value_current(d: Data, result: dict) -> pd.DataFrame:
-    rows = current_rows(d)
-    f, _ = features_for(rows, d, result["group_means"])
+def current_features(d: Data, result: dict) -> pd.DataFrame:
+    f, _ = features_for(current_rows(d), d, result["group_means"])
     f["year"] = result["level"]  # today's market level
-    X = design_matrix(f)[result["columns"]]
+    return f
+
+
+def value_current(d: Data, result: dict, f: pd.DataFrame | None = None) -> pd.DataFrame:
+    f = current_features(d, result) if f is None else f
+    X = design_matrix(f, result.get("numeric"))[result["columns"]]
     p = predict(result["model"], X, result["band"], f["age"], result["age_rule"],
                 cap=result["cap"])
     out = pd.concat([f[["player_id", "minutes_1y", "minutes_best", "tm_value", "group",

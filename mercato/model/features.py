@@ -40,8 +40,11 @@ LEAGUE_SEASON_MINUTES = 38 * 90
 EURO_RUN_MINUTES = 1200  # roughly one full Champions League or Europa League campaign
 NUMERIC = ["age_under_peak", "age_over_peak", "share_best", "share_1y", "top5_share_2y",
            "ucl_share_2y", "uel_share_2y", "g90", "a90", "ga90", "club_elo", "year"]
-MONOTONE = {"share_best": 1, "top5_share_2y": 1, "ucl_share_2y": 1, "g90": 1, "a90": 1,
-            "ga90": 1, "club_elo": 1, "age_over_peak": -1}
+MONOTONE = {"share_best": 1, "top5_share_2y": 1, "ucl_share_2y": 1, "euro_share": 1,
+            "g90": 1, "a90": 1, "ga90": 1, "club_elo": 1, "age_over_peak": -1}
+NUMERIC_EURO = [c for c in NUMERIC if c not in ("ucl_share_2y", "uel_share_2y")] + ["euro_share"]
+# talent: age, output and position can interact; platform features each act on their own
+TALENT = ["age_under_peak", "age_over_peak", "g90", "a90", "ga90"]
 
 
 def prepare_appearances(apps: pd.DataFrame, team_elo: pd.DataFrame) -> pd.DataFrame:
@@ -156,6 +159,9 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     f["top5_share_2y"] = (f["top5_minutes_2y"] / (2 * LEAGUE_SEASON_MINUTES)).clip(0, 1)
     f["ucl_share_2y"] = (f["ucl_minutes_2y"] / EURO_RUN_MINUTES).clip(0, 1)
     f["uel_share_2y"] = (f["uel_minutes_2y"] / EURO_RUN_MINUTES).clip(0, 1)
+    # Europe as one signal: a Europa League run counts half a Champions League run, capped,
+    # so a player can't collect both rewards (Rogers: UCL in 2024/25, UEL in 2025/26)
+    f["euro_share"] = (f["ucl_share_2y"] + 0.5 * f["uel_share_2y"]).clip(0, 1)
     birth = pd.to_datetime(f["birth"])
     f["age"] = (pd.to_datetime(f["as_of"]) - birth).dt.days / 365.25
     f["age_under_peak"] = (PEAK_AGE - f["age"]).clip(lower=0)
@@ -165,8 +171,8 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     return f, group_means
 
 
-def design_matrix(f: pd.DataFrame) -> pd.DataFrame:
-    X = f[NUMERIC].astype(float).copy()
+def design_matrix(f: pd.DataFrame, numeric: list[str] | None = None) -> pd.DataFrame:
+    X = f[numeric or NUMERIC].astype(float).copy()
     for g in GROUPS:
         X[f"pos_{g}"] = (f["group"] == g).astype(float)
     for lg in LEAGUES:
@@ -176,3 +182,10 @@ def design_matrix(f: pd.DataFrame) -> pd.DataFrame:
 
 def monotone_constraints(columns: list[str]) -> tuple[int, ...]:
     return tuple(MONOTONE.get(c, 0) for c in columns)
+
+
+def additive_platform(columns: list[str]) -> list[list[str]]:
+    """Interaction constraints: talent features and positions may interact; every other
+    feature (playing share, Europe, league, club Elo, season) only adds on its own."""
+    talent = [c for c in columns if c in TALENT or c.startswith("pos_")]
+    return [talent] + [[c] for c in columns if c not in talent]
