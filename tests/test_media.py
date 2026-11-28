@@ -64,3 +64,10 @@ def test_flag_codes():
     assert flag_code("Cote d'Ivoire") == "ci"
     assert flag_code("United States") == "us"
     assert flag_code(None) is None
+
+
+def test_auth_headers_for_new_and_legacy_keys():
+    from mercato.jobs.media import auth_headers
+    assert auth_headers("sb_secret_abc") == {"apikey": "sb_secret_abc"}
+    legacy = auth_headers("eyJhbGciOi.x.y")
+    assert legacy["Authorization"] == "Bearer eyJhbGciOi.x.y"

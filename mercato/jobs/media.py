@@ -60,11 +60,20 @@ class Media:
             return source
         base = settings.supabase_url.rstrip("/")
         r = self.http.post(f"{base}/storage/v1/object/{BUCKET}/{path}", content=data,
-                           headers={"Authorization": f"Bearer {settings.supabase_service_key}",
+                           headers={**auth_headers(settings.supabase_service_key),
                                     "Content-Type": "image/png", "x-upsert": "true"})
         r.raise_for_status()
         self.stats["uploaded"] += 1
         return f"{base}/storage/v1/object/public/{BUCKET}/{path}"
+
+
+def auth_headers(key: str) -> dict:
+    """New Supabase secret keys (sb_secret_...) go in the apikey header only; the gateway
+    rejects them as a Bearer token because they aren't JWTs. Legacy service_role keys are
+    JWTs and go in both."""
+    if key.startswith("sb_"):
+        return {"apikey": key}
+    return {"apikey": key, "Authorization": f"Bearer {key}"}
 
 
 def overrides() -> dict:
