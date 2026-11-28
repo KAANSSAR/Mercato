@@ -1,4 +1,7 @@
-"""Valuation model v1: XGBoost quantiles on inflation-adjusted log transfer fees.
+"""Valuation model v1.2: XGBoost median on inflation-adjusted log transfer fees, with a
+conformal P10 to P90 band (where 80% of real fees landed around the model on held-out
+data), an age decline beyond the ages the data supports, and a cap at the highest
+inflation-adjusted fee ever paid.
 
     uv run python -m mercato.model.train --dry   # train, test, print, write nothing
     uv run python -m mercato.model.train         # also save models and write valuations
@@ -42,8 +45,9 @@ from mercato.sources.tm_datasets import (
     read,
 )
 
-VERSION = "v1.1"
-QUANTILES = {"p10": 0.10, "p50": 0.50, "p90": 0.90}
+VERSION = "v1.2"
+BAND = (0.10, 0.90)  # P10 to P90
+MIN_AGE_SUPPORT = 30  # transfers needed at or above an age to trust the model there
 MIN_TRAIN_FEE = 500_000
 FIRST_TRAIN_SEASON = 2015
 MODEL_DIR = Path("data/models")
@@ -104,33 +108,50 @@ def features_for(rows: pd.DataFrame, d: Data, group_means: dict | None = None):
     return finish(raw_features(rows, *d.prepared()), group_means)
 
 
-def fit_quantiles(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
-                  rounds: dict | None = None) -> tuple[dict, dict]:
-    models, best = {}, {}
-    mono = monotone_constraints(list(X.columns))
-    for name, q in QUANTILES.items():
-        n = rounds[name] if rounds else 3000
-        m = xgb.XGBRegressor(objective="reg:quantileerror", quantile_alpha=q, n_estimators=n,
-                             monotone_constraints=mono,
-                             early_stopping_rounds=100 if X_val is not None else None,
-                             **PARAMS)
-        if X_val is not None:
-            m.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
-            best[name] = int(m.best_iteration) + 1
-        else:
-            m.fit(X, y, verbose=False)
-            best[name] = n
-        models[name] = m
-    return models, best
+def fit_median(X: pd.DataFrame, y: np.ndarray, X_val=None, y_val=None,
+               rounds: int | None = None) -> tuple[xgb.XGBRegressor, int]:
+    """Median (P50) model on log fees."""
+    m = xgb.XGBRegressor(objective="reg:quantileerror", quantile_alpha=0.5,
+                         n_estimators=rounds or 3000,
+                         monotone_constraints=monotone_constraints(list(X.columns)),
+                         early_stopping_rounds=100 if X_val is not None else None, **PARAMS)
+    if X_val is not None:
+        m.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
+        return m, int(m.best_iteration) + 1
+    m.fit(X, y, verbose=False)
+    return m, rounds or 3000
 
 
-def predict(models: dict, X: pd.DataFrame, cap: float | None = None) -> pd.DataFrame:
-    """Quantiles in euros, sorted so they never cross, capped at the highest
-    inflation-adjusted fee ever paid: beyond that the model would be extrapolating
+def residual_band(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
+    """Split conformal band in log space: where real fees landed around the median
+    prediction on held-out data. Never crosses, calibrated by construction."""
+    r = np.asarray(y_true) - np.asarray(y_pred)
+    return float(np.quantile(r, BAND[0])), float(np.quantile(r, BAND[1]))
+
+
+def age_decline(f: pd.DataFrame) -> tuple[float, float]:
+    """Last age with enough transfers to learn from, and the yearly decline in log fee from
+    29 up to that age. Beyond it the model is flat for lack of data, so we apply the decline."""
+    ages = f["age"].astype(float)
+    supported = [a for a in range(28, 41) if (ages >= a).sum() >= MIN_AGE_SUPPORT]
+    support = max(supported) if supported else 30
+    band = (ages >= 29) & (ages < support + 1)
+    by_age = f.loc[band].assign(a=ages[band].astype(int)).groupby("a")["y"].median()
+    slope = np.polyfit(by_age.index, by_age.values, 1)[0] if len(by_age) >= 3 else -0.15
+    return float(support), float(min(slope, -0.05))
+
+
+def predict(model, X: pd.DataFrame, band: tuple[float, float], ages=None,
+            age_rule: tuple[float, float] | None = None, cap: float | None = None) -> pd.DataFrame:
+    """P50 from the model, P10 and P90 from the conformal band, then the age decline past
+    the supported ages and the cap at the highest inflation-adjusted fee ever paid
     (v1 put Lamine Yamal at €602m)."""
-    p = pd.DataFrame({k: np.exp(m.predict(X)) for k, m in models.items()}, index=X.index)
-    s = np.sort(p[["p10", "p50", "p90"]].to_numpy(), axis=1)
-    out = pd.DataFrame(s, columns=["p10", "p50", "p90"], index=X.index)
+    log_p50 = model.predict(X)
+    if ages is not None and age_rule is not None:
+        support, slope = age_rule
+        log_p50 = log_p50 + slope * np.clip(np.asarray(ages, dtype=float) - support, 0, None)
+    out = pd.DataFrame({"p10": np.exp(log_p50 + band[0]), "p50": np.exp(log_p50),
+                        "p90": np.exp(log_p50 + band[1])}, index=X.index)
     if cap is not None:
         out["capped"] = out["p50"] > cap
         out[["p10", "p50", "p90"]] = out[["p10", "p50", "p90"]].clip(upper=cap)
@@ -179,10 +200,13 @@ def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
     f_te, _ = features_for(rows[te], d, gm)
     X_tr, X_va, X_te = design_matrix(f_tr), design_matrix(f_va), design_matrix(f_te)
 
-    _, best = fit_quantiles(X_tr, f_tr["y"].to_numpy(), X_va, f_va["y"].to_numpy())
+    # tune rounds on the validation season, and take the band from its residuals
+    m_tr, best = fit_median(X_tr, f_tr["y"].to_numpy(), X_va, f_va["y"].to_numpy())
+    band = residual_band(f_va["y"].to_numpy(), m_tr.predict(X_va))
     trva = pd.concat([f_tr, f_va], ignore_index=True)
-    m_eval, _ = fit_quantiles(design_matrix(trva), trva["y"].to_numpy(), rounds=best)
-    p_te = predict(m_eval, X_te)
+    rule = age_decline(trva)
+    m_eval, _ = fit_median(design_matrix(trva), trva["y"].to_numpy(), rounds=best)
+    p_te = predict(m_eval, X_te, band, f_te["age"], rule)
     actual = f_te["fee_adj"].to_numpy()
     tm_ok = f_te["tm_value"].notna() & (f_te["tm_value"] > 0)
     tm_adj = deflate(f_te["tm_value"], f_te["season"], index, level)
@@ -191,19 +215,21 @@ def train(d: Data, verbose: bool = True, min_test_moves: int = 200) -> dict:
         "test_season": test_season, "rounds": best,
         "test_mdape": mdape(p_te["p50"], actual),
         "test_coverage_p10_p90": float(((actual >= p_te["p10"]) & (actual <= p_te["p90"])).mean()),
+        "band_multipliers": [round(float(np.exp(b)), 2) for b in band],
+        "age_support": rule[0], "age_decline_per_year": round(float(np.exp(rule[1]) - 1), 3),
         "tm_value_mdape_same_moves": mdape(tm_adj[tm_ok], f_te.loc[tm_ok, "fee_adj"]),
         "naive_median_mdape": mdape(np.full(len(actual), np.median(f_tr["fee_adj"])), actual),
         "fee_index": {int(k): round(float(v)) for k, v in index.items()},
     }
 
     allf = pd.concat([f_tr, f_va, f_te], ignore_index=True)
-    final, _ = fit_quantiles(design_matrix(allf), allf["y"].to_numpy(), rounds=best)
+    final, _ = fit_median(design_matrix(allf), allf["y"].to_numpy(), rounds=best)
     cap = float(rows["fee_adj"].max())
     metrics["cap_eur"] = round(cap)
     if verbose:
         print(json.dumps({k: v for k, v in metrics.items() if k != "fee_index"}, indent=2))
-    return {"models": final, "group_means": gm, "metrics": metrics, "level": level,
-            "columns": list(X_tr.columns), "cap": cap}
+    return {"model": final, "group_means": gm, "metrics": metrics, "level": level,
+            "columns": list(X_tr.columns), "cap": cap, "band": band, "age_rule": rule}
 
 
 def current_rows(d: Data) -> pd.DataFrame:
@@ -224,10 +250,11 @@ def value_current(d: Data, result: dict) -> pd.DataFrame:
     f, _ = features_for(rows, d, result["group_means"])
     f["year"] = result["level"]  # today's market level
     X = design_matrix(f)[result["columns"]]
-    p = predict(result["models"], X, cap=result.get("cap"))
+    p = predict(result["model"], X, result["band"], f["age"], result["age_rule"],
+                cap=result["cap"])
     out = pd.concat([f[["player_id", "minutes_1y", "minutes_best", "tm_value", "group",
                         "age"]], p], axis=1)
-    out["drivers"] = drivers(result["models"]["p50"], X, p["p50"])
+    out["drivers"] = drivers(result["model"], X, p["p50"])
     out["gap"] = out["p50"] / out["tm_value"] - 1
     return out
 
@@ -239,11 +266,11 @@ def save(result: dict, values: pd.DataFrame) -> dict:
 
     out = MODEL_DIR / VERSION
     out.mkdir(parents=True, exist_ok=True)
-    for k, m in result["models"].items():
-        m.save_model(out / f"{k}.json")
+    result["model"].save_model(out / "p50.json")
     (out / "meta.json").write_text(json.dumps(
         {"columns": result["columns"], "group_means": result["group_means"],
-         "level": result["level"], "cap": result["cap"], "metrics": result["metrics"]},
+         "level": result["level"], "cap": result["cap"], "band": result["band"],
+         "age_rule": result["age_rule"], "metrics": result["metrics"]},
         indent=2, default=str))
 
     with connect() as conn, conn.cursor() as cur:

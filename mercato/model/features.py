@@ -1,12 +1,14 @@
 """Player features at a point in time, from Transfermarkt appearances and Mercato Elo.
 
-For each (player, as_of date) we look at the last two years, so one injured season
-doesn't erase a player (v1 read Rodri's ACL year as decline):
+For each (player, as_of date) we look at the last three seasons, so injured seasons
+don't erase a player (v1 read Rodri's ACL year as decline; two seasons wasn't enough
+either, since he was in and out after it):
 
-- level: the better of the last two years for minutes and minutes share
+- level: the best of the last three years for minutes and minutes share
 - recency: minutes in the last year, unconstrained, so genuine decline still shows
-- goals, assists and goal involvements per 90 over both years, each weighted by the
-  opponent's Elo, then shrunk towards his position's average for small samples
+- goals, assists and goal involvements per 90 over three years weighted 1, 0.75, 0.5
+  towards the recent, each goal or assist weighted by the opponent's Elo, then shrunk
+  towards his position's average for small samples
 - Champions League and Europa League minutes over two years (proven at the top level)
 - top-5 league minutes over two years, his club's Elo, the league he plays in
 - age as years under and over 27, so value has to fall past the peak even where
@@ -27,6 +29,8 @@ GROUPS = ["GK", "CB", "FB", "DM", "CM", "AM", "W", "ST"]
 LEAGUES = TOP5 + ["other"]
 
 PEAK_AGE = 27.0
+YEARS = 3
+RECENCY = (1.0, 0.75, 0.5)  # weights for last year, the year before, and the one before that
 NUMERIC = ["age_under_peak", "age_over_peak", "minutes_best", "minutes_1y", "share_best",
            "apps_1y", "g90", "a90", "ga90", "ucl_minutes_2y", "uel_minutes_2y",
            "top5_minutes_2y", "club_elo", "year"]
@@ -68,33 +72,34 @@ def raw_features(rows: pd.DataFrame, apps: pd.DataFrame, games: pd.DataFrame,
     by_player = {pid: g for pid, g in apps.groupby("player_id", sort=False)}
     by_club = {cid: g["date"].to_numpy() for cid, g in games.groupby("tm_club_id", sort=False)}
     out = []
+    empty = np.array([], dtype="datetime64[ns]")
     for r in rows.itertuples(index=False):
         t = pd.Timestamp(r.as_of)
-        y1, y2 = t - pd.Timedelta(days=365), t - pd.Timedelta(days=730)
+        edges = [t - pd.Timedelta(days=365 * k) for k in range(YEARS + 1)]  # t, t-1y, t-2y, t-3y
         a = by_player.get(r.player_id)
-        rec = {"minutes_1y": 0.0, "minutes_prev": 0.0, "apps_1y": 0, "goals_w": 0.0,
-               "assists_w": 0.0, "ucl_minutes_2y": 0.0, "uel_minutes_2y": 0.0,
-               "top5_minutes_2y": 0.0, "club_games_1y": 0, "club_games_prev": 0}
+        rec = {"apps_1y": 0, "ucl_minutes_2y": 0.0, "uel_minutes_2y": 0.0, "top5_minutes_2y": 0.0}
+        for k in range(YEARS):
+            rec |= {f"minutes_y{k}": 0.0, f"goals_y{k}": 0.0, f"assists_y{k}": 0.0,
+                    f"club_games_y{k}": 0}
         if a is not None:
-            last = a[(a["date"] < t) & (a["date"] >= y1)]
-            prev = a[(a["date"] < y1) & (a["date"] >= y2)]
-            two = a[(a["date"] < t) & (a["date"] >= y2)]
-            rec.update(
-                minutes_1y=float(last["minutes_played"].sum()),
-                minutes_prev=float(prev["minutes_played"].sum()),
-                apps_1y=len(last),
-                goals_w=float(last["goals_w"].sum()),
-                assists_w=float(last["assists_w"].sum()),
-                ucl_minutes_2y=float(two.loc[two["competition_id"] == "CL", "minutes_played"].sum()),
-                uel_minutes_2y=float(two.loc[two["competition_id"] == "EL", "minutes_played"].sum()),
-                top5_minutes_2y=float(two.loc[two["competition_id"].isin(TOP5),
-                                              "minutes_played"].sum()),
-            )
-            for key, part, lo, hi in (("club_games_1y", last, y1, t), ("club_games_prev", prev, y2, y1)):
-                rec[key] = int(sum(
+            two = a[(a["date"] < t) & (a["date"] >= edges[2])]
+            rec |= {"ucl_minutes_2y": float(two.loc[two["competition_id"] == "CL",
+                                                     "minutes_played"].sum()),
+                    "uel_minutes_2y": float(two.loc[two["competition_id"] == "EL",
+                                                     "minutes_played"].sum()),
+                    "top5_minutes_2y": float(two.loc[two["competition_id"].isin(TOP5),
+                                                      "minutes_played"].sum())}
+            for k in range(YEARS):
+                hi, lo = edges[k], edges[k + 1]
+                part = a[(a["date"] < hi) & (a["date"] >= lo)]
+                if k == 0:
+                    rec["apps_1y"] = len(part)
+                rec[f"minutes_y{k}"] = float(part["minutes_played"].sum())
+                rec[f"goals_y{k}"] = float(part["goals_w"].sum())
+                rec[f"assists_y{k}"] = float(part["assists_w"].sum())
+                rec[f"club_games_y{k}"] = int(sum(
                     ((d < hi.to_datetime64()) & (d >= lo.to_datetime64())).sum()
-                    for d in (by_club.get(c, np.array([], dtype="datetime64[ns]"))
-                              for c in part["player_club_id"].unique())))
+                    for d in (by_club.get(c, empty) for c in part["player_club_id"].unique())))
         out.append(rec)
     feats = pd.concat([rows.reset_index(drop=True), pd.DataFrame(out)], axis=1)
 
@@ -115,9 +120,15 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
     """Per 90 with shrinkage towards the position average, age, encodings.
     group_means from training are reused at prediction time."""
     f = feats.copy()
-    mins = (f["minutes_1y"] + f["minutes_prev"]).clip(lower=0)  # per 90 over both years
-    for k, src in [("g90", "goals_w"), ("a90", "assists_w")]:
-        f[f"{k}_raw"] = np.where(mins > 0, f[src] / mins.where(mins > 0, 1) * 90, 0.0)
+    # recency-weighted output over three seasons: an injured year neither erases a player
+    # nor lets an old peak dominate
+    w = RECENCY
+    mins = sum(w[k] * f[f"minutes_y{k}"] for k in range(YEARS)).clip(lower=0)
+    goals = sum(w[k] * f[f"goals_y{k}"] for k in range(YEARS))
+    assists = sum(w[k] * f[f"assists_y{k}"] for k in range(YEARS))
+    safe = mins.where(mins > 0, 1)
+    f["g90_raw"] = np.where(mins > 0, goals / safe * 90, 0.0)
+    f["a90_raw"] = np.where(mins > 0, assists / safe * 90, 0.0)
     f["ga90_raw"] = f["g90_raw"] + f["a90_raw"]
     if group_means is None:
         group_means = {}
@@ -129,12 +140,13 @@ def finish(feats: pd.DataFrame, group_means: dict | None = None) -> tuple[pd.Dat
         prior = f["group"].map(group_means[k]).fillna(0)
         f[k] = (mins * f[f"{k}_raw"] + K_MINUTES * prior) / (mins + K_MINUTES)
 
-    share_1y = np.where(f["club_games_1y"] > 0,
-                        f["minutes_1y"] / (90 * f["club_games_1y"].clip(lower=1)), 0)
-    share_prev = np.where(f["club_games_prev"] > 0,
-                          f["minutes_prev"] / (90 * f["club_games_prev"].clip(lower=1)), 0)
-    f["share_best"] = np.clip(np.maximum(share_1y, share_prev), 0, 1)
-    f["minutes_best"] = np.maximum(f["minutes_1y"], f["minutes_prev"])
+    # level: the best of the last three seasons
+    shares = [np.where(f[f"club_games_y{k}"] > 0,
+                       f[f"minutes_y{k}"] / (90 * f[f"club_games_y{k}"].clip(lower=1)), 0)
+              for k in range(YEARS)]
+    f["share_best"] = np.clip(np.maximum.reduce(shares), 0, 1)
+    f["minutes_best"] = np.maximum.reduce([f[f"minutes_y{k}"] for k in range(YEARS)])
+    f["minutes_1y"] = f["minutes_y0"]
     birth = pd.to_datetime(f["birth"])
     f["age"] = (pd.to_datetime(f["as_of"]) - birth).dt.days / 365.25
     f["age_under_peak"] = (PEAK_AGE - f["age"]).clip(lower=0)
